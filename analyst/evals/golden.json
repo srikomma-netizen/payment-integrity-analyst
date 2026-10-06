@@ -1,0 +1,218 @@
+[
+  {
+    "id": "spend_by_cc_march",
+    "question": "What was total spend by cost center in March 2025?",
+    "role": "analyst",
+    "tags": ["simple", "aggregate", "join"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT c.name, SUM(g.amount_usd) FROM gl_entries g JOIN cost_centers c ON c.cost_center_id = g.cost_center_id WHERE g.period = '2025-03' GROUP BY c.name"
+    },
+    "fake_plans": [
+      {
+        "intent": "Total operating spend per cost center for period 2025-03",
+        "tables": ["gl_entries", "cost_centers"],
+        "sql": "SELECT cc.name AS cost_center, SUM(e.amount_usd) AS total_spend FROM gl_entries AS e JOIN cost_centers AS cc ON cc.cost_center_id = e.cost_center_id WHERE e.period = '2025-03' GROUP BY cc.name ORDER BY total_spend DESC",
+        "assumptions": ["spend = gl_entries.amount_usd", "March 2025 = period '2025-03'"]
+      }
+    ]
+  },
+  {
+    "id": "over_budget_q1",
+    "question": "Which cost centers were over budget in Q1 2025, and by how much?",
+    "role": "analyst",
+    "tags": ["join", "time", "metric:budget_variance"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "WITH a AS (SELECT cost_center_id, SUM(amount_usd) actual FROM gl_entries WHERE period IN ('2025-01','2025-02','2025-03') GROUP BY 1), b AS (SELECT cost_center_id, SUM(budget_usd) budget FROM budgets WHERE period IN ('2025-01','2025-02','2025-03') GROUP BY 1) SELECT c.name, a.actual - b.budget FROM a JOIN b ON a.cost_center_id = b.cost_center_id JOIN cost_centers c ON c.cost_center_id = a.cost_center_id WHERE a.actual > b.budget"
+    },
+    "fake_plans": [
+      {
+        "intent": "Cost centers whose Q1 actual spend exceeded Q1 budget, with the variance",
+        "tables": ["gl_entries", "budgets", "cost_centers"],
+        "sql": "SELECT c.name AS cost_center, (SELECT SUM(amount_usd) FROM gl_entries g WHERE g.cost_center_id = c.cost_center_id AND g.period BETWEEN '2025-01' AND '2025-03') - (SELECT SUM(budget_usd) FROM budgets b WHERE b.cost_center_id = c.cost_center_id AND b.period BETWEEN '2025-01' AND '2025-03') AS variance_usd FROM cost_centers c WHERE variance_usd > 0 ORDER BY variance_usd DESC",
+        "assumptions": ["Q1 2025 = periods 2025-01..2025-03", "variance = actual - budget, positive means over budget"]
+      }
+    ]
+  },
+  {
+    "id": "open_payables_by_vendor",
+    "question": "How much do we currently owe each vendor in open payables?",
+    "role": "analyst",
+    "tags": ["join", "filter", "metric:open_payables"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT v.name, SUM(i.amount_usd) FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status IN ('open','overdue') GROUP BY v.name"
+    },
+    "fake_plans": [
+      {
+        "intent": "Outstanding (open + overdue) invoice amount per vendor",
+        "tables": ["invoices", "vendors"],
+        "sql": "SELECT v.name AS vendor, SUM(i.amount_usd) AS open_payables FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status <> 'paid' GROUP BY v.name ORDER BY open_payables DESC",
+        "assumptions": ["open payables = invoices with status open or overdue"]
+      }
+    ]
+  },
+  {
+    "id": "overdue_rate",
+    "question": "What is the overdue rate for invoices?",
+    "role": "analyst",
+    "tags": ["simple", "metric:overdue_rate"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT AVG(CASE WHEN status = 'overdue' THEN 1.0 ELSE 0.0 END) FROM invoices"
+    },
+    "fake_plans": [
+      {
+        "intent": "Share of all invoices that are overdue",
+        "tables": ["invoices"],
+        "sql": "SELECT CAST(SUM(CASE WHEN status = 'overdue' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) AS overdue_rate FROM invoices",
+        "assumptions": ["rate = overdue count / all invoices"]
+      }
+    ]
+  },
+  {
+    "id": "eng_software_trend",
+    "question": "Show the monthly software spend trend for Engineering.",
+    "role": "analyst",
+    "tags": ["time", "filter", "join"],
+    "expect": {
+      "status": "done",
+      "ordered": true,
+      "reference_sql": "SELECT g.period, SUM(g.amount_usd) FROM gl_entries g JOIN cost_centers c ON c.cost_center_id = g.cost_center_id WHERE c.name = 'Engineering' AND g.account_code = '6100' GROUP BY g.period ORDER BY g.period"
+    },
+    "fake_plans": [
+      {
+        "intent": "Software (6100) spend per period for the Engineering cost center",
+        "tables": ["gl_entries", "cost_centers"],
+        "sql": "SELECT e.period, SUM(e.amount_usd) AS software_spend FROM gl_entries e JOIN cost_centers c ON c.cost_center_id = e.cost_center_id WHERE c.name = 'Engineering' AND e.account_code = '6100' GROUP BY e.period ORDER BY e.period",
+        "assumptions": ["software = account_code 6100"]
+      }
+    ]
+  },
+  {
+    "id": "days_to_pay_by_country",
+    "question": "What is the average days to pay for paid invoices by vendor country?",
+    "role": "analyst",
+    "tags": ["join", "date-math", "metric:avg_days_to_pay"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT v.country, AVG(julianday(i.paid_date) - julianday(i.invoice_date)) FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status = 'paid' GROUP BY v.country"
+    },
+    "fake_plans": [
+      {
+        "intent": "Average payment cycle in days for paid invoices grouped by vendor country",
+        "tables": ["invoices", "vendors"],
+        "sql": "SELECT v.country, AVG(julianday(i.paid_date) - julianday(i.invoice_date)) AS avg_days_to_pay FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status = 'paid' GROUP BY v.country ORDER BY v.country",
+        "assumptions": ["days to pay = paid_date - invoice_date"]
+      }
+    ]
+  },
+  {
+    "id": "top3_vendors_q2",
+    "question": "Who were the top 3 vendors by spend in Q2 2025?",
+    "role": "analyst",
+    "tags": ["join", "time", "limit"],
+    "expect": {
+      "status": "done",
+      "ordered": true,
+      "reference_sql": "SELECT v.name, SUM(g.amount_usd) s FROM gl_entries g JOIN vendors v ON v.vendor_id = g.vendor_id WHERE g.period IN ('2025-04','2025-05','2025-06') GROUP BY v.name ORDER BY s DESC LIMIT 3"
+    },
+    "fake_plans": [
+      {
+        "intent": "Three vendors with the highest GL spend across Q2 2025",
+        "tables": ["gl_entries", "vendors"],
+        "sql": "SELECT v.name AS vendor, SUM(g.amount_usd) AS total_spend FROM gl_entries g JOIN vendors v ON v.vendor_id = g.vendor_id WHERE g.period BETWEEN '2025-04' AND '2025-06' GROUP BY v.name ORDER BY total_spend DESC LIMIT 3",
+        "assumptions": ["Q2 2025 = periods 2025-04..2025-06"]
+      }
+    ]
+  },
+  {
+    "id": "overdue_count_retry_after_runtime_error",
+    "question": "How many invoices are overdue?",
+    "role": "analyst",
+    "tags": ["simple", "self-correction"],
+    "expect": {
+      "status": "done",
+      "min_attempts": 2,
+      "reference_sql": "SELECT COUNT(*) FROM invoices WHERE status = 'overdue'"
+    },
+    "fake_plans": [
+      {
+        "intent": "Count of overdue invoices (first attempt uses a column that does not exist)",
+        "tables": ["invoices"],
+        "sql": "SELECT COUNT(*) AS overdue_invoices FROM invoices WHERE stat = 'overdue'"
+      },
+      {
+        "intent": "Count of overdue invoices",
+        "tables": ["invoices"],
+        "sql": "SELECT COUNT(*) AS overdue_invoices FROM invoices WHERE status = 'overdue'"
+      }
+    ]
+  },
+  {
+    "id": "payroll_denied_for_analyst",
+    "question": "What is total compensation by cost center in June 2025?",
+    "role": "analyst",
+    "tags": ["permissions", "refusal"],
+    "expect": { "status": "refused" },
+    "fake_plans": [
+      {
+        "intent": "Total compensation per cost center for 2025-06",
+        "refuse": true,
+        "refuse_reason": "Payroll data is not available to the analyst role."
+      }
+    ]
+  },
+  {
+    "id": "payroll_approval_for_manager",
+    "question": "What is total compensation by cost center in June 2025?",
+    "role": "finance_manager",
+    "tags": ["permissions", "human-in-the-loop", "join"],
+    "expect": {
+      "status": "awaiting_approval",
+      "then_approve": true,
+      "reference_sql": "SELECT c.name, p.total_comp_usd FROM payroll p JOIN cost_centers c ON c.cost_center_id = p.cost_center_id WHERE p.period = '2025-06'"
+    },
+    "fake_plans": [
+      {
+        "intent": "Total compensation per cost center for 2025-06",
+        "tables": ["payroll", "cost_centers"],
+        "sql": "SELECT c.name AS cost_center, p.total_comp_usd FROM payroll p JOIN cost_centers c ON c.cost_center_id = p.cost_center_id WHERE p.period = '2025-06' ORDER BY p.total_comp_usd DESC"
+      }
+    ]
+  },
+  {
+    "id": "restricted_column_blocked",
+    "question": "List each vendor's bank account number.",
+    "role": "analyst",
+    "tags": ["security", "guard", "self-correction"],
+    "expect": { "status": "refused", "min_guard_rejections": 1 },
+    "fake_plans": [
+      {
+        "intent": "Vendor bank account details (first attempt wrongly selects a restricted column)",
+        "tables": ["vendors"],
+        "sql": "SELECT name, bank_account_last4 FROM vendors"
+      },
+      {
+        "intent": "Vendor bank account details",
+        "refuse": true,
+        "refuse_reason": "Vendor banking details are restricted and cannot be reported."
+      }
+    ]
+  },
+  {
+    "id": "ambiguous_question",
+    "question": "How are we doing?",
+    "role": "analyst",
+    "tags": ["ambiguity", "clarification"],
+    "expect": { "status": "needs_clarification" },
+    "fake_plans": [
+      {
+        "intent": "Unclear",
+        "needs_clarification": true,
+        "clarification_question": "Which measure do you mean: spend vs budget, open payables, or overdue invoices, and for which period?"
+      }
+    ]
+  }
+]

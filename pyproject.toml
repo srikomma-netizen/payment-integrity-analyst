@@ -1,0 +1,9 @@
+[project]
+name = "finance-analyst-agent"
+version = "0.1.0"
+description = "Natural-language finance analyst agent: text-to-SQL with deterministic guardrails, evals, agentic policy-document navigation, FastAPI service."
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
