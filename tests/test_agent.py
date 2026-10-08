@@ -104,3 +104,36 @@ def test_fake_script_restarts_each_run(conn):
     first, second = agent.ask("Member details"), agent.ask("Member details")
     assert first.attempts == second.attempts == 2
     assert all(any("REJECTED" in t for t in s.trace) for s in (first, second))
+
+
+# ---- offline stand-in: paraphrase matching ----
+from analyst.evals.run_evals import fake_playbook, load_golden  # noqa: E402
+
+
+def golden_fake():
+    return FakeAnalystLLM(fake_playbook(load_golden()))
+
+
+def test_paraphrase_maps_to_known_question_and_says_so():
+    plan = golden_fake().plan("how many claims were flagged by each risk in march 2025", "", "analyst")
+    assert plan.sql and "2025-03" in plan.sql
+    assert plan.assumptions[0].startswith('Read as the known question "how many claims were flagged by each risk rule')
+
+
+def test_different_month_or_number_never_matches():
+    # a near-identical question about June must not get March's SQL
+    june = golden_fake().plan("how many claims were flagged by each risk in june 2025", "", "analyst")
+    assert june.needs_clarification and not june.sql and "Did you mean" in june.clarification_question
+    top3 = golden_fake().plan("top 3 providers by billed amount in Q1 2025", "", "analyst")
+    assert top3.needs_clarification
+
+
+def test_unrelated_question_gets_no_suggestion():
+    plan = golden_fake().plan("what is the weather", "", "analyst")
+    assert plan.needs_clarification and "Did you mean" not in plan.clarification_question
+
+
+def test_mrn_paraphrase_still_hits_the_guard(conn):
+    s = AnalystAgent(conn, golden_fake()).ask("give me the MRNs of flagged members")
+    assert s.status == "refused" and s.rows == []
+    assert any("restricted column 'mrn'" in t for t in s.trace)

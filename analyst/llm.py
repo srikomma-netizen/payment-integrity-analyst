@@ -5,7 +5,9 @@ scripted stand-in for tests, evals and offline runs.
 """
 from __future__ import annotations
 
+import difflib
 import os
+import re
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -189,11 +191,81 @@ class FakeAnalystLLM:
             # No script for this role: reuse another role's script. The real model's plan
             # does not depend on the role either; the guard enforces what each role may run.
             entry = next((v for k, v in self.playbook.items() if k.endswith(f"::{key}")), None)
+        matched_from = None
         if entry is None:
-            return QueryPlan(
-                intent=question, needs_clarification=True,
-                clarification_question="I don't have a confident interpretation of that question. Which metric and time range do you mean?",
-            )
+            matched_key, entry, suggestion = self._closest(key, role)
+            if entry is None:
+                hint = f' Did you mean: "{suggestion}"?' if suggestion else ""
+                return QueryPlan(
+                    intent=question, needs_clarification=True,
+                    clarification_question="I don't have a confident interpretation of that question. "
+                                           "Which metric and time range do you mean?" + hint,
+                )
+            key, matched_from = matched_key, matched_key.split("::", 1)[-1]
+        plan = self._next_plan(key, entry, feedback)
+        if matched_from:
+            # say which known question this was mapped to, so a paraphrase match is never silent
+            plan = plan.model_copy(update={"assumptions": [f'Read as the known question "{matched_from}"', *plan.assumptions]})
+        return plan
+
+    # --- paraphrase matching -------------------------------------------------
+    # Small and explicit on purpose: this is the offline stand-in, not a model.
+    _STOP = {"a", "an", "the", "of", "in", "for", "by", "to", "is", "are", "was", "were", "and", "or", "with", "on",
+             "what", "which", "who", "how", "many", "much", "show", "me", "list", "give", "tell", "did", "do", "does",
+             "each", "per", "there", "we", "our", "please", "all", "that", "this", "it", "s", "number", "count", "whats",
+             "get", "find", "have", "had", "any", "so", "far", "currently", "right", "now"}
+    _MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+    _SYNONYMS = {"rules": "rule", "risks": "risk", "flags": "flag", "flagged": "flag", "flagging": "flag",
+                 "claims": "claim", "cases": "case", "payments": "payment", "paid": "payment", "vendors": "vendor",
+                 "providers": "provider", "billed": "bill", "billing": "bill", "notes": "note", "duplicates": "duplicate",
+                 "overpaid": "overpayment", "overpayments": "overpayment", "investigators": "investigator", "months": "month",
+                 "monthly": "month", "trend": "month", "investigation": "case", "investigations": "case", "members": "member",
+                 "numbers": "number", "patients": "member", "patient": "member", "fp": "false_positive", "falsepositive": "false_positive"}
+
+    @classmethod
+    def _tokens(cls, q: str) -> tuple[set[str], set[str]]:
+        """(content words, slots). Slots are months, years, quarters and numbers: they must match exactly."""
+        q = q.lower().replace("false positive", "false_positive").replace("days to close", "days_to_close")
+        q = re.sub(r"\bmrns?\b", "medical record", q)  # so "MRNs" reaches the PHI question (and gets blocked)
+        words = re.findall(r"[a-z_]+|\d+", q)
+        content, slots = set(), set()
+        for w in words:
+            if w.isdigit():
+                slots.add(w)
+            elif w[:3] in cls._MONTHS and (len(w) == 3 or w in ("january", "february", "march", "april", "june", "july", "august",
+                                                                 "september", "sept", "october", "november", "december")):
+                slots.add(f"m{cls._MONTHS[w[:3]]}")
+            elif re.fullmatch(r"q[1-4]", w):
+                slots.add(w)
+            elif w not in cls._STOP:
+                content.add(cls._SYNONYMS.get(w, w))
+        return content, slots
+
+    def _closest(self, key: str, role: str):
+        """Best playbook question for a paraphrase, or (None, None, suggestion)."""
+        q_content, q_slots = self._tokens(key)
+        scored = []
+        for k, v in self.playbook.items():
+            k_role, k_q = k.split("::", 1) if "::" in k else (None, k)
+            if k_role not in (None, role) and any(x.endswith("::" + k_q) and x.startswith(role + "::") for x in self.playbook):
+                continue  # a script for this exact role exists; don't take another role's
+            c, s = self._tokens(k_q)
+            if not (q_content | c):
+                continue
+            jaccard = len(q_content & c) / len(q_content | c)
+            typo = difflib.SequenceMatcher(None, key, k_q).ratio()
+            score = max(jaccard, 0.9 * typo)
+            scored.append((score, s == q_slots, k, v, k_q))
+        scored.sort(key=lambda x: -x[0])
+        usable = [x for x in scored if x[1]]
+        if usable and usable[0][0] >= 0.6 and (len(usable) == 1 or usable[0][0] - usable[1][0] >= 0.08 or usable[0][4] == usable[1][4]):
+            return usable[0][2], usable[0][3], None
+        # suggest only on real word overlap; character similarity alone suggests nonsense
+        overlap = [x for x in scored if len(q_content & self._tokens(x[4])[0]) >= 2]
+        suggestion = overlap[0][4] if overlap else None
+        return None, None, suggestion
+
+    def _next_plan(self, key: str, entry, feedback: str | None) -> QueryPlan:
         if isinstance(entry, list):
             # A call without feedback is the first attempt of a new run, so the
             # script restarts; a real model has no memory across runs either.
