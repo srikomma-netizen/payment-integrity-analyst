@@ -22,15 +22,13 @@ def _one(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Any:
 
 def overview(conn: sqlite3.Connection) -> dict[str, Any]:
     """KPIs, monthly trend, per-rule performance, outcomes and provider ranking for the dashboard."""
-    # FIXME: COUNT(*) and SUM(paid_amount) run over claim x flag rows from the LEFT JOIN, so a
-    # claim with two flags is counted twice (monthly totals land slightly above the KPI totals).
-    # `flagged` is DISTINCT and is fine. Needs COUNT(DISTINCT) plus a pre-aggregated flag subquery.
+    # flags are pre-aggregated per claim so the join stays one row per claim
     monthly = _rows(conn, """
         SELECT c.period,
                COUNT(*) AS claims,
                SUM(CASE WHEN c.status = 'paid' THEN c.paid_amount ELSE 0 END) AS paid_amount,
-               COUNT(DISTINCT f.claim_id) AS flagged
-        FROM claims c LEFT JOIN risk_flags f ON f.claim_id = c.claim_id
+               COUNT(f.claim_id) AS flagged
+        FROM claims c LEFT JOIN (SELECT DISTINCT claim_id FROM risk_flags) f ON f.claim_id = c.claim_id
         GROUP BY c.period ORDER BY c.period""")
     for m in monthly:
         m["flag_rate"] = (m["flagged"] / m["claims"]) if m["claims"] else 0.0

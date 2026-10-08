@@ -120,3 +120,9 @@ def test_dashboard_cases_and_audit(client):
     client.post("/ask", json={"question": "How are things looking?"})
     audit = client.get("/audit").json()
     assert audit["counts"].get("phi_blocked", 0) >= 1 and audit["counts"].get("clarification", 0) >= 1
+
+
+def test_dashboard_monthly_totals_match_kpis(client):
+    d = client.get("/dashboard").json()
+    assert sum(m["claims"] for m in d["monthly"]) == d["kpis"]["claims"]
+    assert abs(sum(m["paid_amount"] for m in d["monthly"]) - d["kpis"]["paid_amount"]) < 0.01

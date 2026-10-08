@@ -77,9 +77,12 @@ class AnthropicNavigator:
                 raise RuntimeError(f"model refusal: {getattr(detail, 'explanation', '')}")
             tool_uses = [b for b in response.content if b.type == "tool_use"]
             if response.stop_reason != "tool_use" or not tool_uses or iterations >= self.max_iterations:
-                # FIXME: hitting max_iterations mid tool-use leaves no final JSON text, so validation
-                # fails on "". Should send one last turn without tools to force an answer.
                 text = next((b.text for b in response.content if b.type == "text"), "")
+                if not text.strip():
+                    # ran out of iterations mid tool-use: no final answer, so say so instead of failing
+                    return PolicyAnswer(answer="Ran out of steps before reaching an answer.",
+                                        citations=list(dict.fromkeys(tools.read_ids)), confidence="low",
+                                        evidence_gaps=["navigation stopped at the iteration limit"]), iterations
                 return PolicyAnswer.model_validate_json(text), iterations
             # the assistant turn must be echoed back verbatim (tool_use blocks included) before the results
             messages.append({"role": "assistant", "content": response.content})

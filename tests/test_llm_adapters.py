@@ -74,3 +74,14 @@ def test_navigator_tool_loop_then_structured_answer():
     result_block = second["messages"][-1]["content"][0]
     assert result_block["type"] == "tool_result" and result_block["tool_use_id"] == "tu_1"
     assert "call-back" in result_block["content"]
+
+
+def test_navigator_stops_cleanly_at_iteration_limit():
+    looping = SimpleNamespace(
+        stop_reason="tool_use",
+        content=[SimpleNamespace(type="tool_use", id="tu_1", name="read", input={"section_id": "4.1"})],
+    )
+    client = stub_client(create_responses=[looping, looping])
+    nav = DocumentNavigator(load_default(), AnthropicNavigator(client=client, max_iterations=2))
+    res = nav.ask("vendor bank change?")
+    assert res.answer.confidence == "low" and res.answer.citations == ["4.1"]
