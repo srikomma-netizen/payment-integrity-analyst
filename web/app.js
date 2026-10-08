@@ -1081,7 +1081,7 @@ addEventListener("keydown", (e) => {
     state.meta = await api("/meta");
     const p = $("#provider");
     p.textContent = state.meta.offline ? "Offline · deterministic model" : `Live · ${state.meta.provider}`;
-    p.title = state.meta.offline ? "No ANTHROPIC_API_KEY set: a scripted stand-in model drives the same pipeline" : "Claude via the Anthropic SDK";
+    p.title = state.meta.offline ? "No GEMINI_API_KEY or ANTHROPIC_API_KEY set: a scripted stand-in model drives the same pipeline" : "Live model behind the same pipeline";
   } catch (e) { toast("API unreachable: " + e.message, true); }
   await refreshQueue();
   refreshOpenCount();

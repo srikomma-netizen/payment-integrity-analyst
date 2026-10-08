@@ -96,6 +96,59 @@ class AnthropicNavigator:
             messages.append({"role": "user", "content": results})
 
 
+class GeminiNavigator:
+    """Same tool loop on Gemini. Tools and JSON output don't mix well there, so the
+    final answer is a separate call with no tools and a response schema."""
+
+    def __init__(self, model: str | None = None, client=None, max_iterations: int = 10):
+        from google import genai
+        from google.genai import types
+        from analyst.llm import GEMINI_MODEL, gemini_api_key
+        self.t = types
+        self.client = client or genai.Client(api_key=gemini_api_key())
+        self.model = model or GEMINI_MODEL
+        self.max_iterations = max_iterations
+        decls = [types.FunctionDeclaration(name=s["name"], description=s["description"],
+                                           parameters_json_schema=s["input_schema"])
+                 for s in DocumentTools.schemas()]
+        self._tool_config = types.GenerateContentConfig(
+            system_instruction=NAV_SYSTEM, tools=[types.Tool(function_declarations=decls)],
+            # we run the tools ourselves; the SDK's auto-calling only works with python callables anyway
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True), temperature=0)
+
+    def run(self, question: str, tools: DocumentTools) -> tuple[PolicyAnswer, int]:
+        t = self.t
+        contents = [t.Content(role="user", parts=[t.Part.from_text(text=question)])]
+        iterations = 0
+        while iterations < self.max_iterations:
+            iterations += 1
+            response = self.client.models.generate_content(model=self.model, contents=contents, config=self._tool_config)
+            calls = response.function_calls or []
+            if not calls:
+                break
+            # echo the model turn back as-is: it carries the thought signatures Gemini needs
+            contents.append(response.candidates[0].content)
+            parts = []
+            for fc in calls:
+                try:
+                    out = {"result": tools.dispatch(fc.name, dict(fc.args or {}))}
+                except Exception as e:  # same as the Anthropic loop: errors go back to the model
+                    out = {"error": str(e)}
+                parts.append(t.Part.from_function_response(name=fc.name, response=out))
+            contents.append(t.Content(role="user", parts=parts))
+
+        contents.append(t.Content(role="user", parts=[t.Part.from_text(
+            text="Give the final answer now, using only the sections you have read.")]))
+        final = self.client.models.generate_content(
+            model=self.model, contents=contents,
+            config=t.GenerateContentConfig(system_instruction=NAV_SYSTEM, response_mime_type="application/json",
+                                           response_json_schema=PolicyAnswer.model_json_schema(), temperature=0))
+        if not final.text:
+            return PolicyAnswer(answer="The model returned no answer.", citations=list(dict.fromkeys(tools.read_ids)),
+                                confidence="low", evidence_gaps=["empty final response"]), iterations + 1
+        return PolicyAnswer.model_validate_json(final.text), iterations + 1
+
+
 class FakeNavigator:
     """Scripted reader: read the top search hits, then follow the most relevant links.
 
@@ -161,7 +214,12 @@ class DocumentNavigator:
 
 def make_driver(provider: str | None = None) -> NavigatorDriver:
     # same selection rules as analyst.llm.make_llm
+    from analyst.llm import gemini_api_key
     provider = (provider or os.environ.get("LLM_PROVIDER", "auto")).lower()
+    if provider == "fake":
+        return FakeNavigator()
+    if provider == "gemini" or (provider == "auto" and gemini_api_key()):
+        return GeminiNavigator()
     if provider == "anthropic" or (provider == "auto" and os.environ.get("ANTHROPIC_API_KEY")):
         return AnthropicNavigator()
     return FakeNavigator()

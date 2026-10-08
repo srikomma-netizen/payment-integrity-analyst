@@ -29,9 +29,11 @@ python -m analyst.evals.run_evals    # golden-set evals
 python -m pytest -q
 ```
 
-Without an `ANTHROPIC_API_KEY` it runs against a scripted stand-in model, which is
-what the tests use. Set the key to use Claude (`ANALYST_MODEL`, default
-`claude-opus-5-5`). Nothing else changes.
+Without an API key it runs against a scripted stand-in model, which is what the
+tests use. Set `GEMINI_API_KEY` to use Gemini (`GEMINI_MODEL`, default
+`gemini-2.5-flash`), or `ANTHROPIC_API_KEY` to use Claude (`
+`). Gemini
+wins if both are set; `LLM_PROVIDER=gemini|anthropic|fake` forces one.
 
 ## What's in here
 

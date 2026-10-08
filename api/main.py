@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
     llm = make_llm(playbook=fake_playbook(load_golden()))
     app.state.agent = AnalystAgent(conn, llm)
     app.state.navigator = DocumentNavigator(load_default())
-    app.state.provider = type(llm).__name__
+    app.state.provider = getattr(llm, "label", type(llm).__name__)
     app.state.offline = isinstance(llm, FakeAnalystLLM)
     yield
     conn.close()

@@ -1,7 +1,7 @@
 """LLM boundary for the analyst agent: plan() writes SQL, answer() narrates results.
 
-AnthropicAnalystLLM calls the API; FakeAnalystLLM is a scripted stand-in for
-tests, evals and offline runs.
+GeminiAnalystLLM and AnthropicAnalystLLM call a real model; FakeAnalystLLM is a
+scripted stand-in for tests, evals and offline runs.
 """
 from __future__ import annotations
 
@@ -11,6 +11,12 @@ from typing import Protocol
 from pydantic import BaseModel, Field
 
 DEFAULT_MODEL = os.environ.get("ANALYST_MODEL", "claude-opus-5-5")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+
+def gemini_api_key() -> str | None:
+    # the SDK accepts either name; GOOGLE_API_KEY wins if both are set, same as the SDK
+    return os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 
 class QueryPlan(BaseModel):
@@ -105,6 +111,51 @@ class AnthropicAnalystLLM:
         return self._parse(ANSWER_SYSTEM, user, AnswerDraft)
 
 
+class GeminiAnalystLLM:
+    """Same contract as the Anthropic adapter, on Gemini via google-genai."""
+
+    def __init__(self, model: str = GEMINI_MODEL, client=None):
+        from google import genai  # lazy, like the anthropic import
+        from google.genai import types
+        self._types = types
+        self.client = client or genai.Client(api_key=gemini_api_key())
+        self.model = model
+        self.label = f"Gemini · {model}"
+
+    def _parse(self, system: str, user: str, schema: type[BaseModel]):
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=user,
+            config=self._types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                # plain JSON schema from pydantic; we validate ourselves below rather than trust .parsed
+                response_json_schema=schema.model_json_schema(),
+                temperature=0,
+            ),
+        )
+        text = response.text
+        if not text:
+            # blocked prompt or a safety stop: no candidate text to parse
+            feedback = getattr(response, "prompt_feedback", None)
+            reason = getattr(feedback, "block_reason", None) or getattr((response.candidates or [None])[0], "finish_reason", None)
+            raise LLMRefusal(f"Gemini returned no text ({reason})")
+        return schema.model_validate_json(text)
+
+    def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan:
+        user = f"Role of the requesting user: {role}\n\nQuestion: {question}"
+        if feedback:
+            user += ("\n\nYour previous SQL was rejected by the validation layer. Fix it.\n"
+                     f"Rejection: {feedback}")
+        return self._parse(PLAN_SYSTEM + schema_text, user, QueryPlan)
+
+    def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft:
+        preview = rows[:50]
+        user = (f"Question: {question}\n\nSQL that was executed:\n{sql}\n\n"
+                f"Columns: {columns}\nRows ({len(rows)} total, showing {len(preview)}):\n{preview}")
+        return self._parse(ANSWER_SYSTEM, user, AnswerDraft)
+
+
 class FakeAnalystLLM:
     """Deterministic stand-in driven by a playbook.
 
@@ -165,10 +216,12 @@ class FakeAnalystLLM:
 
 
 def make_llm(provider: str | None = None, playbook=None) -> AnalystLLM:
-    # "auto" uses the real API only when a key is set, so a fresh checkout runs offline
+    # "auto" picks Gemini, then Claude, based on which key is set; no key at all means offline
     provider = (provider or os.environ.get("LLM_PROVIDER", "auto")).lower()
     if provider == "fake":
         return FakeAnalystLLM(playbook)
+    if provider == "gemini" or (provider == "auto" and gemini_api_key()):
+        return GeminiAnalystLLM()
     if provider == "anthropic" or (provider == "auto" and os.environ.get("ANTHROPIC_API_KEY")):
         return AnthropicAnalystLLM()
     return FakeAnalystLLM(playbook)
