@@ -1,6 +1,6 @@
-"""End-to-end evals over golden.json: end status, result match, groundedness, guard/retry.
+"""Evals over golden.json.
 
-Run:  python -m analyst.evals.run_evals            (offline, FakeLLM)
+Run:  python -m analyst.evals.run_evals
       LLM_PROVIDER=anthropic python -m analyst.evals.run_evals
 """
 from __future__ import annotations
@@ -25,15 +25,12 @@ def load_golden(path: Path = GOLDEN_PATH) -> list[dict]:
 
 
 def fake_playbook(cases: list[dict]) -> dict[str, QueryPlan | list[QueryPlan]]:
-    """Build the FakeLLM playbook from golden cases, keyed "role::question"."""
-    # keyed per role because the real model sees a role-specific catalog and can plan differently
     book: dict[str, QueryPlan | list[QueryPlan]] = {}
     for c in cases:
         plans = [QueryPlan(**p) for p in c.get("fake_plans", [])]
         if not plans:
             continue
         key = f"{c.get('role', 'analyst')}::{c['question']}"
-        # a list means one plan per attempt (retry scripts); a single plan is replayed every time
         book[key] = plans if len(plans) > 1 else plans[0]
     return book
 
@@ -45,10 +42,7 @@ def _normalize_cell(v):
 
 
 def rows_equal(expected: list[list], actual: list[list], *, ordered: bool, tol: float = 1e-4) -> bool:
-    """Compare result sets by value, not by SQL text, since different queries can be equally right.
-
-    Column names are ignored (aliases differ); column order is not.
-    """
+    """Compare result sets by value. Column names ignored, order not."""
     if len(expected) != len(actual):
         return False
     if expected and len(expected[0]) != len(actual[0]):
@@ -59,12 +53,10 @@ def rows_equal(expected: list[list], actual: list[list], *, ordered: bool, tol: 
 
     e, a = norm(expected), norm(actual)
     if not ordered:
-        # repr gives a total order over mixed types/None; rounding first keeps float noise from reordering rows
         e, a = sorted(e, key=repr), sorted(a, key=repr)
     for er, ar in zip(e, a):
         for ev, av in zip(er, ar):
             if isinstance(ev, (int, float)) and isinstance(av, (int, float)):
-                # int vs float is fine here (COUNT vs SUM(1.0) style differences)
                 if not math.isclose(ev, av, rel_tol=tol, abs_tol=tol):
                     return False
             elif ev != av:
@@ -85,7 +77,6 @@ class CaseResult:
 
 
 def evaluate_case(agent: AnalystAgent, conn, case: dict) -> CaseResult:
-    """Run one golden case and score status, result match and groundedness independently."""
     exp = case["expect"]
     notes: list[str] = []
     state: RunState = agent.ask(case["question"], role=case.get("role", "analyst"))
@@ -94,7 +85,6 @@ def evaluate_case(agent: AnalystAgent, conn, case: dict) -> CaseResult:
     if not status_ok:
         notes.append(f"status={state.status} expected={exp['status']} error={state.error}")
 
-    # approval cases are checked twice: first that the run paused, then that it finishes once approved
     if exp.get("then_approve") and state.status == "awaiting_approval":
         state = agent.decide(state.run_id, approved=True)
         if state.status != "done":
@@ -109,14 +99,13 @@ def evaluate_case(agent: AnalystAgent, conn, case: dict) -> CaseResult:
         if rejections < exp["min_guard_rejections"]:
             status_ok = False
             notes.append(f"guard rejections={rejections}")
-        if state.rows:  # a blocked question must never leak rows, even after a "fixed" retry
+        if state.rows:  # blocked question leaked rows
             status_ok = False
             notes.append("rows were returned for a blocked question")
 
     result_match: bool | None = None
     if "reference_sql" in exp and state.status == "done":
-        # reference rows are computed live against the same warehouse, so golden.json
-        # doesn't go stale when the seed changes. Reference SQL is trusted and unguarded.
+        # computed live so a seed change doesn't break golden.json
         ref_rows = [list(r) for r in conn.execute(exp["reference_sql"]).fetchall()]
         result_match = rows_equal(ref_rows, state.rows, ordered=exp.get("ordered", False))
         if not result_match:
@@ -126,13 +115,13 @@ def evaluate_case(agent: AnalystAgent, conn, case: dict) -> CaseResult:
     if grounded is False:
         notes.append(f"ungrounded: {state.caveats}")
 
-    passed = status_ok and result_match is not False and grounded is not False  # None = not applicable
+    passed = status_ok and result_match is not False and grounded is not False  # None = n/a
     return CaseResult(case["id"], case.get("tags", []), passed, status_ok, result_match, grounded, state.attempts, notes)
 
 
 def run_suite(cases: list[dict] | None = None, *, provider: str | None = None) -> list[CaseResult]:
     cases = cases or load_golden()
-    conn = build_warehouse()  # fresh warehouse and agent per suite, so runs don't share checkpoints
+    conn = build_warehouse()
     llm = make_llm(provider, playbook=fake_playbook(cases))
     agent = AnalystAgent(conn, llm)
     return [evaluate_case(agent, conn, c) for c in cases]
@@ -161,7 +150,7 @@ def _rate(vals: list[bool | None]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
-    provider = argv[0] if argv else None  # optional positional override of LLM_PROVIDER
+    provider = argv[0] if argv else None  # overrides LLM_PROVIDER
     results = run_suite(provider=provider)
     width = max(len(r.id) for r in results) + 2
     print(f"{'case'.ljust(width)}pass  status  match  grounded  attempts")
@@ -173,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{''.ljust(width)}  - {n}")
     print()
     print(json.dumps(summarize(results), indent=2))
-    return 0 if all(r.passed for r in results) else 1  # non-zero exit so CI can gate on it
+    return 0 if all(r.passed for r in results) else 1
 
 
 if __name__ == "__main__":

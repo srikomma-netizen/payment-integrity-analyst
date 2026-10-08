@@ -5,7 +5,7 @@ get answers back as SQL, a table and a short narrative.
 
 I've spent a lot of time on payment-integrity and fraud analytics, and the part
 that always worried me about text-to-SQL is trusting it with sensitive data. This
-project is me working through that: the model only *plans* the query, and plain
+project is me working through that: the model only plans the query, and plain
 code decides whether it's allowed to run.
 
 All data here is synthetic. No real members, providers or PHI.
@@ -56,12 +56,12 @@ web/             the console (plain HTML/CSS/JS, no build step)
 
 ## The console
 
-- **Overview**: claim volume, flag rate, open cases, false-positive rate by rule, provider risk.
-- **Case worklist**: filterable list of investigations, with a detail panel per case.
-- **Ask the data**: shows each step of the run, the SQL, the result as a chart or table, and the trace.
-- **SIU approvals**: queries on investigator notes wait here until an SIU lead approves them.
-- **Policy navigator**: shows which sections of the policy the agent read and in what order.
-- **Evaluation / Audit trail / Data catalog**: eval results, every query and what the guard did with it, and the schema as each role sees it.
+- Overview: claim volume, flag rate, open cases, false-positive rate by rule, provider risk.
+- Case worklist: filterable list of investigations, with a detail panel per case.
+- Ask the data: shows each step of the run, the SQL, the result as a chart or table, and the trace.
+- SIU approvals: queries on investigator notes wait here until an SIU lead approves them.
+- Policy navigator: shows which sections of the policy the agent read and in what order.
+- Evaluation / Audit trail / Data catalog: eval results, every query and what the guard did with it, and the schema as each role sees it.
 
 Ctrl+K opens a command palette for jumping to pages, cases or asking a question.
 
@@ -74,26 +74,25 @@ Ctrl+K opens a command palette for jumping to pages, cases or asking a question.
 
 `mrn`, `dob`, `npi` and `bank_account_last4` are blocked for everyone. They're left
 out of the schema the model sees, and the guard rejects any query that mentions
-them, including in filters and subqueries. The second part is the one that
-matters, because it doesn't depend on the model behaving.
+them, including in filters and subqueries.
 
 ## Notes on a few choices
 
-- **The guard returns the SQL it validated, and that's what runs.** Otherwise you
+- The guard returns the SQL it validated, and that's what runs. Otherwise you
   check one string and execute another.
-- **Evals compare result rows, not SQL text.** Two different queries can both be
+- Evals compare result rows, not SQL text. Two different queries can both be
   right. Each golden case has a reference query; both run against the same data.
-- **Numbers in the answer are checked against the rows.** If the model writes a
+- Numbers in the answer are checked against the rows. If the model writes a
   number that isn't in the result, the answer gets a caveat instead of going out
   silently.
-- **Approval is a pause in the graph**, not an if-statement. The run is saved and
+- Approval is a pause in the graph, not an if-statement. The run is saved and
   resumed by id once someone decides. The API also refuses decisions from
   anyone who isn't an SIU lead.
-- **Policy questions use an agent that follows references** instead of grabbing
+- Policy questions use an agent that follows references instead of grabbing
   the top 3 chunks. Policy text says things like "as defined in Section 2.1",
   and a chunk can't follow that. On 5 labelled questions, flat chunks found
   57% of the needed sections and the navigator found all of them.
-- **Dashboard numbers don't come from the model.** They're fixed queries, so they
+- Dashboard numbers don't come from the model. They're fixed queries, so they
   come out the same every time.
 
 ## Things I'd do next

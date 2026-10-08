@@ -1,8 +1,4 @@
-"""Minimal state-graph runtime (LangGraph-style) with checkpoint/resume.
-
-Nodes are plain `state -> state` functions; edges are fixed names or router
-functions. Kept in-house so tests exercise the exact code that runs.
-"""
+"""Tiny langgraph-style runner with checkpoint/resume."""
 from __future__ import annotations
 
 import time
@@ -13,7 +9,6 @@ from typing import Any, Callable
 END = "__end__"
 
 
-# One mutable object per run. Nodes mutate and return it; the whole thing is what gets checkpointed.
 @dataclass
 class RunState:
     question: str
@@ -21,10 +16,10 @@ class RunState:
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     created_at: float = field(default_factory=time.time)
     status: str = "running"            # running | awaiting_approval | done | refused | needs_clarification | failed
-    next_node: str = ""                # where resume() picks up after an interrupt
+    next_node: str = ""                # resume() picks up here
     attempts: int = 0
-    feedback: str | None = None        # set => routers send the run back to the planner
-    approved: bool | None = None       # None = not asked yet, which is different from rejected
+    feedback: str | None = None        # set -> back to the planner
+    approved: bool | None = None       # None = not asked yet
     plan: dict[str, Any] | None = None
     sql: str | None = None
     tables: list[str] = field(default_factory=list)
@@ -45,28 +40,24 @@ Router = Callable[[RunState], str]
 
 
 class CheckpointStore:
-    """In-memory checkpoint store; the graph only needs get/put."""
+    """In-memory checkpoint store."""
 
-    # NOTE: runs live in process memory, so a restart drops anything awaiting approval.
-    # TODO: back this with Redis or Postgres before running more than one worker.
+    # TODO: redis/postgres before running more than one worker
 
     def __init__(self) -> None:
         self._runs: dict[str, RunState] = {}
 
     def put(self, state: RunState) -> None:
-        # stores the live object, not a copy; fine in-process, a real store would serialize here
         self._runs[state.run_id] = state
 
     def get(self, run_id: str) -> RunState | None:
         return self._runs.get(run_id)
 
     def all(self) -> list[RunState]:
-        """Newest first."""
         return sorted(self._runs.values(), key=lambda r: r.created_at, reverse=True)
 
 
 class Graph:
-    # max_steps bounds a run so a routing bug can't loop forever
     def __init__(self, entry: str, *, max_steps: int = 25) -> None:
         self.entry = entry
         self.max_steps = max_steps
@@ -78,19 +69,17 @@ class Graph:
         return self
 
     def add_edge(self, src: str, dst: str | Router) -> "Graph":
-        """dst is either a node name / END, or a router function."""
         self._edges[src] = dst
         return self
 
     def _next(self, current: str, state: RunState) -> str:
-        edge = self._edges.get(current, END)  # a node with no outgoing edge ends the run
+        edge = self._edges.get(current, END)
         return edge(state) if callable(edge) else edge
 
     def run(self, state: RunState, store: CheckpointStore | None = None) -> RunState:
-        """Step through nodes until END or an approval interrupt; also used to resume."""
-        # a resumed state already carries next_node, so this only defaults fresh runs
+        """Run until END or an approval interrupt. Also used to resume."""
         state.next_node = state.next_node or self.entry
-        steps = 0  # per call, so a resumed run gets a fresh step budget
+        steps = 0  # per call, resumes get a fresh budget
         while state.next_node != END:
             if steps >= self.max_steps:
                 state.status, state.error = "failed", f"step limit {self.max_steps} exceeded"
@@ -101,19 +90,17 @@ class Graph:
             state.log(f"-> {name}")
             try:
                 state = node(state)
-            except Exception as e:  # a node crash is a failed run, not a crashed server
+            except Exception as e:  # fail the run, not the server
                 state.status, state.error = "failed", f"{name}: {type(e).__name__}: {e}"
                 state.next_node = END
                 break
             if state.status == "awaiting_approval":
-                # interrupt: persist and hand control to a human.
-                # Resolve the next node before saving so resume() knows where to continue.
+                # pick next node before saving so resume knows where to go
                 state.next_node = self._next(name, state)
                 if store:
                     store.put(state)
                 return state
             state.next_node = self._next(name, state)
-        # refused / needs_clarification / failed are terminal statuses set by nodes; leave them
         if state.status == "running":
             state.status = "done"
         if store:
@@ -121,7 +108,7 @@ class Graph:
         return state
 
     def resume(self, run_id: str, store: CheckpointStore, *, approved: bool) -> RunState:
-        """Apply a human decision to a paused run. Raises KeyError / ValueError for bad ids or states."""
+        """Apply a human decision to a paused run."""
         state = store.get(run_id)
         if state is None:
             raise KeyError(run_id)
@@ -131,7 +118,6 @@ class Graph:
         state.status = "running"
         state.log(f"human decision: {'approved' if approved else 'rejected'}")
         if not approved:
-            # rejected runs never re-enter the graph, so the gated query is never executed
             state.status, state.next_node = "rejected", END
             store.put(state)
             return state

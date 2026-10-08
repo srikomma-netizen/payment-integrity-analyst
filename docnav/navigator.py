@@ -1,8 +1,4 @@
-"""Answer policy questions by iterating search -> read -> follow cross-refs, with citations.
-
-AnthropicNavigator runs a tool loop against the API; FakeNavigator is a
-deterministic reader used by tests and offline runs.
-"""
+"""Policy Q&A: search, read, follow cross-refs, cite."""
 from __future__ import annotations
 
 import json
@@ -50,16 +46,15 @@ If the policy does not address something, say so in evidence_gaps instead of gue
 
 class AnthropicNavigator:
     def __init__(self, model: str = DEFAULT_MODEL, client=None, max_iterations: int = 10):
-        import anthropic  # lazy, so offline paths don't need the SDK installed
+        import anthropic
         self.client = client or anthropic.Anthropic()
         self.model = model
         self.max_iterations = max_iterations
         schema = PolicyAnswer.model_json_schema()
-        schema["additionalProperties"] = False  # pydantic doesn't emit this, and structured output wants it
+        schema["additionalProperties"] = False  # pydantic leaves this out
         self._format = {"type": "json_schema", "schema": schema}
 
     def run(self, question: str, tools: DocumentTools) -> tuple[PolicyAnswer, int]:
-        # Manual tool loop rather than an SDK runner so the stop conditions are explicit.
         messages = [{"role": "user", "content": question}]
         iterations = 0
         while True:
@@ -79,26 +74,24 @@ class AnthropicNavigator:
             if response.stop_reason != "tool_use" or not tool_uses or iterations >= self.max_iterations:
                 text = next((b.text for b in response.content if b.type == "text"), "")
                 if not text.strip():
-                    # ran out of iterations mid tool-use: no final answer, so say so instead of failing
+                    # hit the limit mid tool-use
                     return PolicyAnswer(answer="Ran out of steps before reaching an answer.",
                                         citations=list(dict.fromkeys(tools.read_ids)), confidence="low",
                                         evidence_gaps=["navigation stopped at the iteration limit"]), iterations
                 return PolicyAnswer.model_validate_json(text), iterations
-            # the assistant turn must be echoed back verbatim (tool_use blocks included) before the results
             messages.append({"role": "assistant", "content": response.content})
-            results = []  # all results for this turn go back in a single user message
+            results = []
             for tu in tool_uses:
                 try:
                     out = tools.dispatch(tu.name, dict(tu.input))
                     results.append({"type": "tool_result", "tool_use_id": tu.id, "content": json.dumps(out)})
-                except Exception as e:  # tool errors go back to the model, never crash the loop
+                except Exception as e:  # send errors back to the model
                     results.append({"type": "tool_result", "tool_use_id": tu.id, "content": str(e), "is_error": True})
             messages.append({"role": "user", "content": results})
 
 
 class GeminiNavigator:
-    """Same tool loop on Gemini. Tools and JSON output don't mix well there, so the
-    final answer is a separate call with no tools and a response schema."""
+    """Gemini tool loop. Final answer is a separate no-tools call."""
 
     def __init__(self, model: str | None = None, client=None, max_iterations: int = 10):
         from google import genai
@@ -113,7 +106,6 @@ class GeminiNavigator:
                  for s in DocumentTools.schemas()]
         self._tool_config = types.GenerateContentConfig(
             system_instruction=NAV_SYSTEM, tools=[types.Tool(function_declarations=decls)],
-            # we run the tools ourselves; the SDK's auto-calling only works with python callables anyway
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True), temperature=0)
 
     def run(self, question: str, tools: DocumentTools) -> tuple[PolicyAnswer, int]:
@@ -126,13 +118,13 @@ class GeminiNavigator:
             calls = response.function_calls or []
             if not calls:
                 break
-            # echo the model turn back as-is: it carries the thought signatures Gemini needs
+            # echo as-is, it carries the thought signatures
             contents.append(response.candidates[0].content)
             parts = []
             for fc in calls:
                 try:
                     out = {"result": tools.dispatch(fc.name, dict(fc.args or {}))}
-                except Exception as e:  # same as the Anthropic loop: errors go back to the model
+                except Exception as e:
                     out = {"error": str(e)}
                 parts.append(t.Part.from_function_response(name=fc.name, response=out))
             contents.append(t.Content(role="user", parts=parts))
@@ -150,37 +142,30 @@ class GeminiNavigator:
 
 
 class FakeNavigator:
-    """Scripted reader: read the top search hits, then follow the most relevant links.
+    """Offline reader: top search hits, then follow the best links."""
 
-    Deterministic, so tests can assert on exactly which sections were read.
-    """
-
-    # top_k = initial reads, follow_budget = extra link-follows, min_words filters heading-only sections
     def __init__(self, top_k: int = 3, follow_budget: int = 4, min_words: int = 10):
         self.top_k, self.follow_budget, self.min_words = top_k, follow_budget, min_words
 
     def run(self, question: str, tools: DocumentTools) -> tuple[PolicyAnswer, int]:
-        hits = tools.search(question, k=6)  # over-fetch so skipped container headings don't eat the top_k
-        read: dict[str, dict] = {}  # insertion order = reading order, which becomes citation order
+        hits = tools.search(question, k=6)  # over-fetch, some get skipped
+        read: dict[str, dict] = {}  # order = citation order
         for h in hits:
             if len(read) >= self.top_k:
                 break
             sec = tools.doc.get(h["section_id"])
-            if sec is None or sec.word_count() < self.min_words:   # skip bare container headings
+            if sec is None or sec.word_count() < self.min_words:   # bare headings
                 continue
             read[h["section_id"]] = tools.read(h["section_id"])
 
         for _ in range(self.follow_budget):
-            # explicit "see Section X" links outrank reverse links, as they would for a human reader
             frontier: dict[str, float] = {}
             for page in read.values():
                 for ref in page["cross_references"]:
                     frontier[ref] = max(frontier.get(ref, 0.0), 1.0)
                 for ref in page.get("cited_by", []):
                     frontier.setdefault(ref, 0.0)
-            # a link only counts if the target shares terms with the question, so the +1 bonus
-            # favors explicit refs but can't rescue an irrelevant section.
-            # Remaining ties go to the lower id so the order is stable.
+            # +1 for forward refs, target still has to match the question
             scored = sorted(((tools.index.score(question, ref) + bonus, ref) for ref, bonus in frontier.items()
                              if ref not in read and tools.doc.get(ref) and tools.index.score(question, ref) > 0),
                             key=lambda x: (-x[0], x[1]))
@@ -192,13 +177,12 @@ class FakeNavigator:
         if not read:
             return PolicyAnswer(answer="The policy does not appear to address this.", citations=[],
                                 confidence="low", evidence_gaps=[question]), 1
-        # no synthesis offline: quote the opening of each section read and let citations do the work
         lines = [f"({sid}) {sec['title']}: {sec['text'][:220].strip()}..." for sid, sec in read.items()]
         return PolicyAnswer(
             answer="Relevant policy text:\n" + "\n".join(lines),
             citations=list(read),
             confidence="high" if len(read) >= 2 else "medium",
-        ), 1 + len(read)  # one search plus one "turn" per read, roughly what a model loop would take
+        ), 1 + len(read)  # search + one per read
 
 
 class DocumentNavigator:
@@ -207,13 +191,12 @@ class DocumentNavigator:
         self.driver = driver or make_driver()
 
     def ask(self, question: str) -> NavigationResult:
-        tools = DocumentTools(self.doc)  # fresh per question so the call log and read list start empty
+        tools = DocumentTools(self.doc)  # fresh per question
         answer, iterations = self.driver.run(question, tools)
         return NavigationResult(answer, tools.calls, list(dict.fromkeys(tools.read_ids)), iterations)
 
 
 def make_driver(provider: str | None = None) -> NavigatorDriver:
-    # same selection rules as analyst.llm.make_llm
     from analyst.llm import gemini_api_key
     provider = (provider or os.environ.get("LLM_PROVIDER", "auto")).lower()
     if provider == "fake":

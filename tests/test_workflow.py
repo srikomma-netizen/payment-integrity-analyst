@@ -3,7 +3,6 @@ from analyst.workflow import END, CheckpointStore, Graph, RunState
 
 def test_linear_graph_runs_to_done():
     g = Graph(entry="a")
-    # (log(...), s)[1] is just a way to log and return the state from a lambda
     g.add_node("a", lambda s: (s.log("a"), s)[1]).add_edge("a", "b")
     g.add_node("b", lambda s: (s.log("b"), s)[1]).add_edge("b", END)
     s = g.run(RunState(question="q"))
@@ -43,7 +42,7 @@ def test_interrupt_checkpoint_and_resume():
 
     paused = g.run(RunState(question="q"), store)
     assert paused.status == "awaiting_approval" and paused.answer is None
-    assert store.get(paused.run_id) is paused  # the in-memory store keeps the object itself, not a copy
+    assert store.get(paused.run_id) is paused
 
     resumed = g.resume(paused.run_id, store, approved=True)
     assert resumed.status == "done" and resumed.answer == "did the work"

@@ -1,13 +1,10 @@
-"""Fixed SQL behind the dashboard and case worklist (no model in this path).
-
-These bypass the guard, so they must never select a restricted column.
-"""
+"""Fixed SQL for the dashboard and worklist. Skips the guard."""
 from __future__ import annotations
 
 import sqlite3
 from typing import Any
 
-SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}  # not referenced below; CASE_SQL inlines the same ranking
+SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}  # unused, CASE_SQL inlines it
 
 
 def _rows(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
@@ -21,8 +18,7 @@ def _one(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Any:
 
 
 def overview(conn: sqlite3.Connection) -> dict[str, Any]:
-    """KPIs, monthly trend, per-rule performance, outcomes and provider ranking for the dashboard."""
-    # flags are pre-aggregated per claim so the join stays one row per claim
+    """Everything the dashboard needs."""
     monthly = _rows(conn, """
         SELECT c.period,
                COUNT(*) AS claims,
@@ -33,12 +29,12 @@ def overview(conn: sqlite3.Connection) -> dict[str, Any]:
     for m in monthly:
         m["flag_rate"] = (m["flagged"] / m["claims"]) if m["claims"] else 0.0
 
-    # same semantics as the duplicate_overpayment metric in catalog.py: everything past the largest payment
+    # matches duplicate_overpayment in catalog.py
     dup = conn.execute("""
         SELECT COUNT(*), COALESCE(SUM(over), 0) FROM (
           SELECT claim_id, SUM(amount) - MAX(amount) AS over FROM payments GROUP BY claim_id HAVING COUNT(*) > 1)""").fetchone()
     closed = _one(conn, "SELECT COUNT(*) FROM cases WHERE status = 'closed'")
-    fp = _one(conn, "SELECT COUNT(*) FROM cases WHERE outcome = 'false_positive'")  # outcome is only set on closed cases
+    fp = _one(conn, "SELECT COUNT(*) FROM cases WHERE outcome = 'false_positive'")
     kpis = {
         "claims": _one(conn, "SELECT COUNT(*) FROM claims"),
         "paid_amount": _one(conn, "SELECT COALESCE(SUM(paid_amount), 0) FROM claims WHERE status = 'paid'"),
@@ -60,7 +56,6 @@ def overview(conn: sqlite3.Connection) -> dict[str, Any]:
         FROM risk_flags f LEFT JOIN cases k ON k.claim_id = f.claim_id
         GROUP BY f.rule_id, f.signal_type, f.severity ORDER BY f.rule_id""")
     for r in by_rule:
-        # None, not 0.0: a rule with no closed cases has no rate yet, and the UI shows n/a
         r["false_positive_rate"] = (r["false_positive"] / r["closed"]) if r["closed"] else None
     outcomes = _rows(conn, """
         SELECT COALESCE(outcome, 'open') AS outcome, COUNT(*) AS cases, COALESCE(SUM(recovery_amount), 0) AS recovered
@@ -76,8 +71,7 @@ def overview(conn: sqlite3.Connection) -> dict[str, Any]:
     return {"kpis": kpis, "monthly": monthly, "by_rule": by_rule, "outcomes": outcomes, "providers": providers}
 
 
-# Shared by the worklist and the detail view; callers append WHERE / ORDER BY.
-# Open cases are aged against 2025-07-31, the end of the synthetic data window, not today's date.
+# 2025-07-31 = end of the synthetic data, used to age open cases
 CASE_SQL = """
     SELECT k.case_id, k.claim_id, k.status, k.outcome, k.opened_date, k.closed_date, k.investigator,
            k.recovery_amount, c.member_id, c.claim_type, c.procedure_code, c.procedure_desc, c.period,
@@ -98,7 +92,6 @@ def _severity(rank: int | None) -> str:
 
 
 def cases(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    # 'open' sorts after 'closed', so DESC puts open cases first
     out = _rows(conn, CASE_SQL + " ORDER BY k.status DESC, sev_rank DESC, k.opened_date DESC")
     for r in out:
         r["severity"] = _severity(r.pop("sev_rank"))
@@ -115,11 +108,11 @@ def case_detail(conn: sqlite3.Connection, case_id: str) -> dict[str, Any] | None
     case["rules"] = (case["rules"] or "").split(",") if case["rules"] else []
     case["flags"] = _rows(conn, "SELECT flag_id, rule_id, signal_type, severity, score, flagged_date FROM risk_flags WHERE claim_id = ? ORDER BY score DESC", (case["claim_id"],))
     case["payments"] = _rows(conn, "SELECT payment_id, paid_date, amount, payee_id, method FROM payments WHERE claim_id = ? ORDER BY paid_date", (case["claim_id"],))
-    # explicit column list keeps mrn/dob out; never SELECT * from members here
+    # no SELECT * here, mrn/dob
     case["member"] = _rows(conn, "SELECT member_id, plan, region FROM members WHERE member_id = ?", (case["member_id"],))[0]
     case["member_history"] = _rows(conn, """
         SELECT claim_id, service_date, procedure_code, billed_amount, status FROM claims
         WHERE member_id = ? ORDER BY service_date DESC LIMIT 8""", (case["member_id"],))
-    # count only; note text is siu_lead + approval and stays behind the agent's guard
+    # count only, note text is siu_lead only
     case["note_count"] = _one(conn, "SELECT COUNT(*) FROM investigator_notes WHERE case_id = ?", (case_id,))
     return case

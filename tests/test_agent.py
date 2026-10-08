@@ -24,7 +24,7 @@ def test_happy_path_returns_grounded_answer(conn):
     assert s.rows == [[6]]
     assert s.grounded is True
     assert "6" in s.answer
-    assert s.sql.endswith("LIMIT 200")  # the guard's rewritten SQL is what ran, with the default cap
+    assert s.sql.endswith("LIMIT 200")
 
 
 def test_guard_rejection_feeds_back_and_retries(conn):
@@ -38,12 +38,10 @@ def test_guard_rejection_feeds_back_and_retries(conn):
     assert s.status == "done" and s.attempts == 2
     _, feedback = agent.llm.calls[1]
     assert "restricted column 'mrn'" in feedback
-    # nothing from the rejected first attempt leaked into the final rows
     assert all(not str(v).startswith("MRN") for r in s.rows for v in r)
 
 
 def test_gives_up_after_max_attempts(conn):
-    # a single plan replays on every attempt, so the guard rejects it until attempts run out
     agent = make_agent(conn, {"bad": QueryPlan(intent="x", sql="DELETE FROM cases")})
     s = agent.ask("bad")
     assert s.status == "failed" and "3 attempts" in s.error
@@ -52,7 +50,6 @@ def test_gives_up_after_max_attempts(conn):
 def test_runtime_sql_error_is_retried(conn):
     agent = make_agent(conn, {
         "open case count": [
-            # the guard doesn't check column existence, so the typo only fails inside SQLite
             QueryPlan(intent="x", sql="SELECT COUNT(*) FROM cases WHERE stat = 'open'"),
             QueryPlan(intent="x", sql="SELECT COUNT(*) AS n FROM cases WHERE status = 'open'"),
         ],
@@ -68,7 +65,7 @@ def test_refusal_and_clarification_do_not_touch_db(conn):
     })
     s = agent.ask("secret")
     assert s.status == "refused" and s.rows == [] and s.sql is None
-    s2 = agent.ask("something vague")  # not in the playbook, so the fake asks for clarification
+    s2 = agent.ask("something vague")
     assert s2.status == "needs_clarification" and "?" in s2.answer
 
 
@@ -80,7 +77,6 @@ def test_notes_require_approval_then_run(conn):
     assert paused.status == "awaiting_approval" and paused.rows == []
     done = agent.decide(paused.run_id, approved=True)
     assert done.status == "done" and done.rows[0][0] > 0
-    # analyst role is denied by the guard before any approval question arises
     denied = agent.ask("notes", role="analyst")
     assert denied.status == "failed" and "not permitted" in denied.error
 
@@ -88,13 +84,12 @@ def test_notes_require_approval_then_run(conn):
 def test_groundedness_check():
     cols, rows = ["provider", "total_billed"], [["Lakeside Family Clinic", 13029.3], ["Northshore Diagnostics", 12990.41]]
     assert is_grounded("Lakeside billed $13,029.30 and Northshore $12,990.41 (2 rows).", cols, rows)[0]
-    assert is_grounded("Lakeside billed about 13k.", cols, rows)[0]  # 13 x 1,000 is within 0.5% of 13029.3
+    assert is_grounded("Lakeside billed about 13k.", cols, rows)[0]  # 13000 is within 0.5% of 13029.3
     ok, bad = is_grounded("Lakeside billed 20,000.", cols, rows)
     assert not ok and bad == [20000.0]
 
 
 def test_fake_script_restarts_each_run(conn):
-    """Asking the same question twice must replay the full script both times."""
     agent = make_agent(conn, {
         "member details": [
             QueryPlan(intent="x", sql="SELECT member_id, mrn FROM members"),
@@ -106,7 +101,6 @@ def test_fake_script_restarts_each_run(conn):
     assert all(any("REJECTED" in t for t in s.trace) for s in (first, second))
 
 
-# ---- offline stand-in: paraphrase matching ----
 from analyst.evals.run_evals import fake_playbook, load_golden  # noqa: E402
 
 
@@ -121,7 +115,6 @@ def test_paraphrase_maps_to_known_question_and_says_so():
 
 
 def test_different_month_or_number_never_matches():
-    # a near-identical question about June must not get March's SQL
     june = golden_fake().plan("how many claims were flagged by each risk in june 2025", "", "analyst")
     assert june.needs_clarification and not june.sql and "Did you mean" in june.clarification_question
     top3 = golden_fake().plan("top 3 providers by billed amount in Q1 2025", "", "analyst")

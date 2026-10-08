@@ -1,6 +1,4 @@
-"""HTTP API for the analyst agent, approval queue, policy navigator and web console.
-
-Endpoint list is at /docs once the server is up.
+"""API + web console.
 
 Run:  uvicorn api.main:app --reload     then open http://localhost:8000/
 """
@@ -28,9 +26,9 @@ from docnav.document import load_default
 from docnav.navigator import DocumentNavigator
 
 ROLES = ("analyst", "siu_lead")
-ROLE_PATTERN = "^(analyst|siu_lead)$"  # must match ROLES; pydantic needs the regex form
+ROLE_PATTERN = "^(analyst|siu_lead)$"  # keep in sync with ROLES
 WEB_DIR = Path(__file__).resolve().parents[1] / "web"
-# stepper columns in the UI. "approve" isn't a graph node; it's derived from the trace.
+# "approve" isn't a real node, it comes from the trace
 PIPELINE = ("understand", "guard", "approve", "execute", "compose", "verify")
 
 
@@ -42,7 +40,7 @@ class AskRequest(BaseModel):
 class DecisionRequest(BaseModel):
     approved: bool
     reviewer: str = Field(default="unknown", max_length=80)
-    # In production this comes from the caller's verified identity, not the body.
+    # should come from auth
     reviewer_role: str = Field(default="siu_lead", pattern=ROLE_PATTERN)
 
 
@@ -50,18 +48,15 @@ class PolicyRequest(BaseModel):
     question: str = Field(min_length=3, max_length=500)
 
 
-# --------------------------------------------------------------------------- #
-# trace -> structured pipeline events (the UI renders these as a stepper)
-# --------------------------------------------------------------------------- #
+# --- trace -> stepper events
 _MS = re.compile(r"in ([\d.]+) ms")
 
 
-# The trace strings are written in analyst/agent.py and workflow.py; these prefixes must
-# stay in sync with them. Unrecognized lines are ignored rather than raising.
+# prefixes must match the log lines in agent.py / workflow.py
 def pipeline_events(s: RunState) -> list[dict[str, Any]]:
-    """Turn a run's free-text trace into per-node events for the UI stepper."""
+    """Trace -> per-node events for the stepper."""
     events: list[dict[str, Any]] = []
-    attempt = 0  # bumped on each entry to understand, so retries show as separate rows
+    attempt = 0
 
     def add(node: str, outcome: str, detail: str = "") -> None:
         events.append({"node": node, "outcome": outcome, "detail": detail, "attempt": attempt})
@@ -71,7 +66,6 @@ def pipeline_events(s: RunState) -> list[dict[str, Any]]:
             attempt += 1
             add("understand", "ok")
         elif line.startswith("catalog slice:") or line.startswith("plan:"):
-            # detail lines, not events: fold them into the understand event they belong to
             if events and events[-1]["node"] == "understand":
                 events[-1]["detail"] = (events[-1]["detail"] + " | " if events[-1]["detail"] else "") + line
         elif line.startswith("guard REJECTED:"):
@@ -82,7 +76,6 @@ def pipeline_events(s: RunState) -> list[dict[str, Any]]:
                 add("approve", "pending", "waiting for SIU-lead decision")
         elif line.startswith("human decision:"):
             decision = line.split(":", 1)[1].strip()
-            # update the pending approve event in place instead of adding a second one
             for e in reversed(events):
                 if e["node"] == "approve" and e["outcome"] == "pending":
                     e["outcome"], e["detail"] = ("ok" if decision == "approved" else "error"), f"human {decision}"
@@ -92,18 +85,16 @@ def pipeline_events(s: RunState) -> list[dict[str, Any]]:
         elif line.startswith("execute ERROR:"):
             add("execute", "error", line.split(":", 1)[1].strip())
         elif line == "-> compose":
-            # compose logs nothing itself; a refusal there shows up via the failed status below
             add("compose", "ok")
         elif line.startswith("verify:"):
             add("verify", "ok" if "UNGROUNDED" not in line else "error", line.split(":", 1)[1].strip())
         elif line.startswith("reviewer:"):
-            # the API logs the reviewer after resume() returns, so it can land after execute/verify lines
+            # logged after resume, so it can come late
             for e in reversed(events):
                 if e["node"] == "approve":
                     e["detail"] += f" by {line.split(':', 1)[1].strip()}"
                     break
 
-    # Terminal outcomes that end the run in understand (refusal / clarification) or fail.
     if s.status in ("refused", "needs_clarification") and events:
         last_understand = next((e for e in reversed(events) if e["node"] == "understand"), None)
         if last_understand:
@@ -113,12 +104,10 @@ def pipeline_events(s: RunState) -> list[dict[str, Any]]:
 
 
 def pipeline_summary(events: list[dict[str, Any]], status: str) -> dict[str, str]:
-    """Final state per node for the stepper: ok | error | pending | stop | skipped."""
     out = {n: "skipped" for n in PIPELINE}
     for e in events:
-        out[e["node"]] = e["outcome"]  # later attempts overwrite earlier ones
-    # a failed run (timeout, refusal, step limit) may have no error event of its own,
-    # so mark the last node that logged anything as the failure point
+        out[e["node"]] = e["outcome"]  # last attempt wins
+    # failed runs may lack an error event, blame the last node
     if status == "failed":
         for n in reversed(PIPELINE):
             if out[n] != "skipped":
@@ -130,7 +119,6 @@ def pipeline_summary(events: list[dict[str, Any]], status: str) -> dict[str, str
 
 def run_view(s: RunState, *, max_rows: int = 200) -> dict[str, Any]:
     events = pipeline_events(s)
-    # timing of the last successful execute, scraped back out of its trace detail
     exec_ms = next((float(m.group(1)) for e in reversed(events) if e["node"] == "execute" and e["outcome"] == "ok"
                     for m in [_MS.search(e["detail"])] if m), None)
     return {
@@ -144,7 +132,7 @@ def run_view(s: RunState, *, max_rows: int = 200) -> dict[str, Any]:
         "tables": s.tables,
         "columns": s.columns,
         "rows": s.rows[:max_rows],
-        "row_count": len(s.rows),  # count before the slice above
+        "row_count": len(s.rows),  # before the slice
         "grounded": s.grounded,
         "caveats": s.caveats,
         "assumptions": (s.plan or {}).get("assumptions", []),
@@ -159,16 +147,13 @@ def run_view(s: RunState, *, max_rows: int = 200) -> dict[str, Any]:
 
 
 def run_brief(s: RunState) -> dict[str, Any]:
-    # list views skip rows and trace to keep /runs payloads small
     return {"run_id": s.run_id, "created_at": s.created_at, "status": s.status, "question": s.question,
             "role": s.role, "sql": s.sql, "tables": s.tables, "attempts": s.attempts}
 
 
-# --------------------------------------------------------------------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    conn = build_warehouse()  # in-memory, rebuilt on every start; runs don't survive a restart either
-    # the golden playbook only matters when make_llm falls back to the fake
+    conn = build_warehouse()  # in-memory, rebuilt each start
     llm = make_llm(playbook=fake_playbook(load_golden()))
     app.state.agent = AnalystAgent(conn, llm)
     app.state.navigator = DocumentNavigator(load_default())
@@ -198,7 +183,6 @@ def health():
 
 @app.get("/meta")
 def meta():
-    # keyed on (question, role): the same question can appear once per role, and both are useful examples
     seen: set[tuple[str, str]] = set()
     examples = []
     for case in load_golden():
@@ -213,7 +197,6 @@ def meta():
 
 @app.get("/schema")
 def schema(role: str = Query("analyst", pattern=ROLE_PATTERN)):
-    # unlike the prompt, this lists restricted columns (flagged) so people can see what's blocked
     tables = []
     for t in catalog.TABLES.values():
         tables.append({
@@ -249,14 +232,13 @@ def get_run(run_id: str):
 
 @app.post("/runs/{run_id}/decision")
 def decide(run_id: str, req: DecisionRequest):
-    # advisory until reviewer_role comes from auth (see DecisionRequest)
     if req.reviewer_role != "siu_lead":
         raise HTTPException(403, "only an SIU lead can approve or reject a held query")
     try:
         state = app.state.agent.decide(run_id, approved=req.approved)
     except KeyError:
         raise HTTPException(404, "run not found")
-    except ValueError as e:  # already decided, or never paused
+    except ValueError as e:  # already decided
         raise HTTPException(409, str(e))
     state.log(f"reviewer: {req.reviewer}")
     return run_view(state)
@@ -293,11 +275,7 @@ def policy_section(section_id: str):
 
 @app.post("/evals/run")
 def evals_run():
-    """Run the golden suite plus the retrieval A/B.
-
-    Always uses the fake LLM so the button is free and repeatable; use the CLI
-    with a real provider to measure the model.
-    """
+    # always fake llm here, use the cli for a real model
     t0 = time.perf_counter()
     results = run_suite(provider="fake")
     retrieval = compare(load_default())
@@ -313,9 +291,7 @@ def evals_run():
     }
 
 
-# --------------------------------------------------------------------------- #
-# operations views (fixed, reviewed queries; never model-generated)
-# --------------------------------------------------------------------------- #
+# --- ops views, fixed sql
 @app.get("/dashboard")
 def dashboard():
     data = insights.overview(app.state.agent.conn)
@@ -337,14 +313,13 @@ def get_case(case_id: str):
 
 
 def _audit_events(s: RunState) -> list[dict[str, Any]]:
-    # Derived from the trace on every request rather than stored separately.
-    # All events share the run's created_at; per-line timestamps aren't recorded.
+    # all events share created_at, no per-line timestamps
     base = {"run_id": s.run_id, "role": s.role, "question": s.question}
     out = [{**base, "ts": s.created_at, "type": "query", "severity": "info", "detail": f"Question asked as {s.role}"}]
     for line in s.trace:
         if line.startswith("guard REJECTED:"):
             msg = line.split(":", 1)[1].strip()
-            phi = "restricted column" in msg  # matches the guard's violation wording
+            phi = "restricted column" in msg  # guard wording
             out.append({**base, "ts": s.created_at, "type": "phi_blocked" if phi else "guard_rejected",
                         "severity": "critical" if phi else "warning", "detail": msg})
         elif "approval=required" in line:
@@ -373,7 +348,7 @@ def _audit_events(s: RunState) -> list[dict[str, Any]]:
 def audit(limit: int = Query(300, ge=1, le=2000)):
     events: list[dict[str, Any]] = []
     for r in app.state.agent.runs():
-        events.extend(reversed(_audit_events(r)))  # runs are newest first, so flip each run's events to match
+        events.extend(reversed(_audit_events(r)))  # newest first
     counts: dict[str, int] = {}
     for e in events:
         counts[e["type"]] = counts.get(e["type"], 0) + 1

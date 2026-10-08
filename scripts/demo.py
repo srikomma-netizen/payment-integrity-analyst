@@ -1,4 +1,4 @@
-"""Walk-through demo. Runs offline by default; set ANTHROPIC_API_KEY to use Claude.
+"""Quick demo, offline unless an API key is set.
 
     python scripts/demo.py
 """
@@ -7,7 +7,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# so `python scripts/demo.py` works from anywhere without installing the package
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from analyst.agent import AnalystAgent          # noqa: E402
@@ -41,11 +40,11 @@ def main() -> None:
 
     show(agent.ask("How many claims were flagged by each risk rule in March 2025?"))
     show(agent.ask("How many duplicate payments were made and what was the total overpaid amount?"))
-    show(agent.ask("How many open cases are there?"))                              # self-corrects after a runtime error
-    show(agent.ask("List the medical record numbers of members with flagged claims."))   # guard blocks PHI column
-    show(agent.ask("Show the investigator notes for open cases.", role="analyst"))  # analyst: refused outright
+    show(agent.ask("How many open cases are there?"))                              # retries after sql error
+    show(agent.ask("List the medical record numbers of members with flagged claims."))   # PHI, blocked
+    show(agent.ask("Show the investigator notes for open cases.", role="analyst"))  # refused
 
-    # same question as siu_lead passes the guard but pauses for approval
+    # siu_lead pauses for approval
     paused = agent.ask("Show the investigator notes for open cases.", role="siu_lead")
     show(paused)
     print("\n... SIU lead approves ...")
@@ -61,7 +60,7 @@ def main() -> None:
     print(f"citations: {res.answer.citations}  confidence: {res.answer.confidence}")
 
     print("\n=== Flat chunks vs navigator (retrieval recall on expert-labelled questions) ===")
-    rows = compare(load_default(), nav.driver)  # reuse the driver so both sections use the same provider
+    rows = compare(load_default(), nav.driver)
     for r in rows:
         print(f"   baseline={r.baseline_recall:.2f}  navigator={r.navigator_recall:.2f}  {r.question[:70]}")
 

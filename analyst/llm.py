@@ -1,8 +1,4 @@
-"""LLM boundary for the analyst agent: plan() writes SQL, answer() narrates results.
-
-GeminiAnalystLLM and AnthropicAnalystLLM call a real model; FakeAnalystLLM is a
-scripted stand-in for tests, evals and offline runs.
-"""
+"""LLM adapters: plan() writes sql, answer() narrates."""
 from __future__ import annotations
 
 import difflib
@@ -17,12 +13,11 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def gemini_api_key() -> str | None:
-    # the SDK accepts either name; GOOGLE_API_KEY wins if both are set, same as the SDK
+    # GOOGLE_API_KEY wins, same as the sdk
     return os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
 
 class QueryPlan(BaseModel):
-    """What the model decided about the question, before anything runs."""
     intent: str = Field(description="One sentence restating the question in business terms.")
     tables: list[str] = Field(default_factory=list, description="Catalog tables the SQL uses.")
     sql: str = Field(default="", description="A single SQLite SELECT statement, or empty if not answerable.")
@@ -39,16 +34,15 @@ class AnswerDraft(BaseModel):
 
 
 class LLMRefusal(Exception):
-    """Raised when the model declines (stop_reason == 'refusal')."""
+    """Model declined."""
 
 
-# Kept to two methods on purpose: anything wider makes the fake harder to keep honest.
 class AnalystLLM(Protocol):
     def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan: ...
     def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft: ...
 
 
-# The rendered catalog slice is appended directly after "CATALOG:", so keep that line last.
+# schema gets appended after CATALOG:, keep it last
 PLAN_SYSTEM = """You are a careful payment-integrity data analyst that writes SQL for a healthcare claims and investigations mart.
 
 Rules:
@@ -65,7 +59,7 @@ Rules:
 CATALOG:
 """
 
-# "Don't compute new numbers" is what lets agent.is_grounded check the answer mechanically.
+# no new numbers, or is_grounded can't check it
 ANSWER_SYSTEM = """You write the final answer for a payment-integrity analyst.
 Use ONLY the numbers in the result rows you are given. Do not compute new numbers that are not present
 (you may restate a number with rounding or commas). If the result is empty, say so plainly.
@@ -74,13 +68,12 @@ Mention the time range and any filters that were applied. Keep it under 120 word
 
 class AnthropicAnalystLLM:
     def __init__(self, model: str = DEFAULT_MODEL, client=None):
-        import anthropic  # imported lazily so offline paths never need it
+        import anthropic  # lazy, offline runs don't need it
         self._anthropic = anthropic
         self.client = client or anthropic.Anthropic()
         self.model = model
 
     def _parse(self, system: str, user: str, schema: type[BaseModel]):
-        # structured output: the SDK validates the reply into `schema`, so no JSON scraping here
         response = self.client.messages.parse(
             model=self.model,
             max_tokens=4000,
@@ -88,7 +81,6 @@ class AnthropicAnalystLLM:
             messages=[{"role": "user", "content": user}],
             output_format=schema,
         )
-        # a refusal has no parsed_output; surface it as its own exception so the agent fails cleanly
         if response.stop_reason == "refusal":
             detail = getattr(response, "stop_details", None)
             raise LLMRefusal(getattr(detail, "explanation", "model declined the request"))
@@ -96,7 +88,6 @@ class AnthropicAnalystLLM:
 
     def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan:
         user = f"Role of the requesting user: {role}\n\nQuestion: {question}"
-        # feedback is the guard's violation list or a SQLite error from the previous attempt
         if feedback:
             user += (
                 "\n\nYour previous SQL was rejected by the validation layer. Fix it.\n"
@@ -105,7 +96,7 @@ class AnthropicAnalystLLM:
         return self._parse(PLAN_SYSTEM + schema_text, user, QueryPlan)
 
     def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft:
-        preview = rows[:50]  # keeps the prompt bounded; the true row count is still stated
+        preview = rows[:50]  # cap prompt size
         user = (
             f"Question: {question}\n\nSQL that was executed:\n{sql}\n\n"
             f"Columns: {columns}\nRows ({len(rows)} total, showing {len(preview)}):\n{preview}"
@@ -114,10 +105,10 @@ class AnthropicAnalystLLM:
 
 
 class GeminiAnalystLLM:
-    """Same contract as the Anthropic adapter, on Gemini via google-genai."""
+    """Gemini adapter via google-genai."""
 
     def __init__(self, model: str = GEMINI_MODEL, client=None):
-        from google import genai  # lazy, like the anthropic import
+        from google import genai
         from google.genai import types
         self._types = types
         self.client = client or genai.Client(api_key=gemini_api_key())
@@ -131,14 +122,13 @@ class GeminiAnalystLLM:
             config=self._types.GenerateContentConfig(
                 system_instruction=system,
                 response_mime_type="application/json",
-                # plain JSON schema from pydantic; we validate ourselves below rather than trust .parsed
+                # validated below, don't trust .parsed
                 response_json_schema=schema.model_json_schema(),
                 temperature=0,
             ),
         )
         text = response.text
         if not text:
-            # blocked prompt or a safety stop: no candidate text to parse
             feedback = getattr(response, "prompt_feedback", None)
             reason = getattr(feedback, "block_reason", None) or getattr((response.candidates or [None])[0], "finish_reason", None)
             raise LLMRefusal(f"Gemini returned no text ({reason})")
@@ -159,16 +149,12 @@ class GeminiAnalystLLM:
 
 
 class FakeAnalystLLM:
-    """Deterministic stand-in driven by a playbook.
-
-    Keys are questions, optionally prefixed "role::". A list value plays one
-    plan per attempt, which is how tests script retry-after-feedback.
-    """
+    """Scripted stand-in. Keys are questions, optionally "role::question"."""
 
     def __init__(self, playbook: dict[str, QueryPlan | list[QueryPlan]] | None = None):
         self.playbook = {self._norm_key(k): v for k, v in (playbook or {}).items()}
         self._attempts: dict[str, int] = {}
-        self.calls: list[tuple[str, str | None]] = []  # (question, feedback) log for test assertions
+        self.calls: list[tuple[str, str | None]] = []  # (question, feedback)
 
     @classmethod
     def _norm_key(cls, key: str) -> str:
@@ -179,17 +165,14 @@ class FakeAnalystLLM:
 
     @staticmethod
     def _norm(q: str) -> str:
-        # case, trailing "?" and extra whitespace shouldn't make a playbook miss
         return " ".join(q.lower().strip().rstrip("?").split())
 
     def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan:
         self.calls.append((question, feedback))
-        # role-specific entry wins ("siu_lead::question"), then the generic one
         key = self._norm(question)
         entry = self.playbook.get(f"{role}::{key}", self.playbook.get(key))
         if entry is None:
-            # No script for this role: reuse another role's script. The real model's plan
-            # does not depend on the role either; the guard enforces what each role may run.
+            # borrow another role's script, guard handles roles
             entry = next((v for k, v in self.playbook.items() if k.endswith(f"::{key}")), None)
         matched_from = None
         if entry is None:
@@ -204,12 +187,10 @@ class FakeAnalystLLM:
             key, matched_from = matched_key, matched_key.split("::", 1)[-1]
         plan = self._next_plan(key, entry, feedback)
         if matched_from:
-            # say which known question this was mapped to, so a paraphrase match is never silent
             plan = plan.model_copy(update={"assumptions": [f'Read as the known question "{matched_from}"', *plan.assumptions]})
         return plan
 
-    # --- paraphrase matching -------------------------------------------------
-    # Small and explicit on purpose: this is the offline stand-in, not a model.
+    # --- paraphrase matching
     _STOP = {"a", "an", "the", "of", "in", "for", "by", "to", "is", "are", "was", "were", "and", "or", "with", "on",
              "what", "which", "who", "how", "many", "much", "show", "me", "list", "give", "tell", "did", "do", "does",
              "each", "per", "there", "we", "our", "please", "all", "that", "this", "it", "s", "number", "count", "whats",
@@ -224,9 +205,9 @@ class FakeAnalystLLM:
 
     @classmethod
     def _tokens(cls, q: str) -> tuple[set[str], set[str]]:
-        """(content words, slots). Slots are months, years, quarters and numbers: they must match exactly."""
+        # slots = months, years, quarters, numbers. must match exactly
         q = q.lower().replace("false positive", "false_positive").replace("days to close", "days_to_close")
-        q = re.sub(r"\bmrns?\b", "medical record", q)  # so "MRNs" reaches the PHI question (and gets blocked)
+        q = re.sub(r"\bmrns?\b", "medical record", q)  # route "MRNs" to the PHI question
         words = re.findall(r"[a-z_]+|\d+", q)
         content, slots = set(), set()
         for w in words:
@@ -242,13 +223,12 @@ class FakeAnalystLLM:
         return content, slots
 
     def _closest(self, key: str, role: str):
-        """Best playbook question for a paraphrase, or (None, None, suggestion)."""
         q_content, q_slots = self._tokens(key)
         scored = []
         for k, v in self.playbook.items():
             k_role, k_q = k.split("::", 1) if "::" in k else (None, k)
             if k_role not in (None, role) and any(x.endswith("::" + k_q) and x.startswith(role + "::") for x in self.playbook):
-                continue  # a script for this exact role exists; don't take another role's
+                continue  # this role has its own script
             c, s = self._tokens(k_q)
             if not (q_content | c):
                 continue
@@ -258,26 +238,25 @@ class FakeAnalystLLM:
             scored.append((score, s == q_slots, k, v, k_q))
         scored.sort(key=lambda x: -x[0])
         usable = [x for x in scored if x[1]]
+        # 0.6 floor, 0.08 margin over the runner-up
         if usable and usable[0][0] >= 0.6 and (len(usable) == 1 or usable[0][0] - usable[1][0] >= 0.08 or usable[0][4] == usable[1][4]):
             return usable[0][2], usable[0][3], None
-        # suggest only on real word overlap; character similarity alone suggests nonsense
+        # char similarity alone suggests junk
         overlap = [x for x in scored if len(q_content & self._tokens(x[4])[0]) >= 2]
         suggestion = overlap[0][4] if overlap else None
         return None, None, suggestion
 
     def _next_plan(self, key: str, entry, feedback: str | None) -> QueryPlan:
         if isinstance(entry, list):
-            # A call without feedback is the first attempt of a new run, so the
-            # script restarts; a real model has no memory across runs either.
+            # no feedback = new run, restart the script
             if feedback is None:
                 self._attempts[key] = 0
             i = self._attempts.get(key, 0)
             self._attempts[key] = i + 1
-            return entry[min(i, len(entry) - 1)]  # past the end, keep replaying the last plan
+            return entry[min(i, len(entry) - 1)]  # replay the last one
         return entry
 
     def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft:
-        # echoes cell values verbatim (first 10 rows) instead of paraphrasing, so verify has little to catch
         if not rows:
             return AnswerDraft(answer="The query returned no rows for that question.")
         if len(rows) == 1 and len(columns) == 1:
@@ -288,7 +267,6 @@ class FakeAnalystLLM:
 
 
 def make_llm(provider: str | None = None, playbook=None) -> AnalystLLM:
-    # "auto" picks Gemini, then Claude, based on which key is set; no key at all means offline
     provider = (provider or os.environ.get("LLM_PROVIDER", "auto")).lower()
     if provider == "fake":
         return FakeAnalystLLM(playbook)

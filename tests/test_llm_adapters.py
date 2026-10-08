@@ -1,5 +1,3 @@
-"""Exercise the Claude adapters against a stub client so the request shapes
-and response handling are covered without network access or an API key."""
 import json
 from types import SimpleNamespace
 
@@ -70,7 +68,6 @@ def test_navigator_tool_loop_then_structured_answer():
     first, second = client.messages.create_calls
     assert first["output_config"]["format"]["type"] == "json_schema"
     assert all(t["strict"] for t in first["tools"])
-    # the tool result was fed back with the matching id
     result_block = second["messages"][-1]["content"][0]
     assert result_block["type"] == "tool_result" and result_block["tool_use_id"] == "tu_1"
     assert "call-back" in result_block["content"]
@@ -87,7 +84,6 @@ def test_navigator_stops_cleanly_at_iteration_limit():
     assert res.answer.confidence == "low" and res.answer.citations == ["4.1"]
 
 
-# ---- Gemini adapters, against a stub of client.models.generate_content ----
 from google.genai import types as gtypes  # noqa: E402
 
 from analyst.llm import GeminiAnalystLLM, make_llm  # noqa: E402
@@ -137,7 +133,6 @@ def test_gemini_navigator_runs_tools_then_asks_for_json():
     assert res.sections_read == ["4.1"] and res.answer.citations == ["4.1"]
     first, second, last = client.models.calls
     assert first["config"].tools and last["config"].tools is None
-    # the read result went back as a function response (contents is one growing list, so search it)
     fr = next(part.function_response for c in second["contents"] for part in c.parts if part.function_response)
     assert fr.name == "read" and "call-back" in fr.response["result"]["text"]
 

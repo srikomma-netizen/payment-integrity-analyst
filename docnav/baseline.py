@@ -1,4 +1,4 @@
-"""Flat-chunk retrieval baseline and a recall comparison against the navigator.
+"""Flat-chunk baseline vs the navigator.
 
 Run:  python -m docnav.baseline
 """
@@ -19,10 +19,8 @@ class Chunk:
 
 
 def flat_chunks(doc: Document, window: int = 80, overlap: int = 20) -> list[Chunk]:
-    """Fixed word windows with overlap, the usual first-cut RAG chunking. Sizes are in words."""
     chunks: list[Chunk] = []
-    # chunks never span a section boundary, which is slightly kinder to the baseline than
-    # chunking the raw file; each chunk still maps back to exactly one section for scoring
+    # sizes in words, chunks stay inside one section
     for s in doc.ordered:
         words = f"{s.title} {s.text}".split()
         start, n = 0, 0
@@ -30,9 +28,9 @@ def flat_chunks(doc: Document, window: int = 80, overlap: int = 20) -> list[Chun
             piece = " ".join(words[start:start + window])
             chunks.append(Chunk(f"{s.id}#{n}", s.id, piece))
             n += 1
-            if start + window >= len(words):  # last window reached the end; don't emit a tail of pure overlap
+            if start + window >= len(words):
                 break
-            start += window - overlap  # requires overlap < window or this never advances
+            start += window - overlap  # overlap must be < window
     return chunks
 
 
@@ -45,12 +43,11 @@ class FlatChunkRetriever:
         return [self.chunks[cid] for cid, _ in self.index.top(question, k)]
 
     def sections(self, question: str, k: int = 3) -> list[str]:
-        # k counts chunks, so two hits in one section leave fewer distinct sections
+        # k counts chunks, not sections
         return list(dict.fromkeys(c.section_id for c in self.retrieve(question, k)))
 
 
-# Expert-labelled: which sections are needed for a complete, correct answer.
-# Most of these hinge on a cross-reference (e.g. a definition in Section 2.x) that flat chunks miss.
+# hand-labelled, most need a cross-ref that flat chunks miss
 RETRIEVAL_EVALS: list[dict] = [
     {"question": "A claim was paid twice after a portal resubmission. Can we auto-recover, and when does an investigator need to approve?",
      "required": ["5.2", "8.1", "2.1"]},
@@ -76,12 +73,12 @@ class CompareRow:
 
 
 def recall(required: list[str], got: list[str]) -> float:
-    # coverage of required sections only; extra reads aren't penalized, so this says nothing about cost
+    # extra reads aren't penalized
     return sum(1 for r in required if r in got) / len(required)
 
 
 def compare(doc: Document, driver: NavigatorDriver | None = None, k: int = 3) -> list[CompareRow]:
-    """Section recall per labelled question, baseline vs navigator. No LLM needed with the fake driver."""
+    """Section recall per question, baseline vs navigator."""
     base = FlatChunkRetriever(doc)
     nav = DocumentNavigator(doc, driver)
     rows = []

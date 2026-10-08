@@ -10,7 +10,7 @@ from analyst.guard import guard_sql
     "SELECT 1; SELECT 2",
     "PRAGMA table_info(members)",
     "SELECT load_extension('evil')",
-    "SELECT * FROM sqlite_master",  # not in the catalog, so it's an unknown table
+    "SELECT * FROM sqlite_master",
     "INSERT INTO risk_flags SELECT * FROM risk_flags",
 ])
 def test_rejects_non_select_and_dangerous(sql):
@@ -21,13 +21,13 @@ def test_rejects_restricted_phi_column_anywhere():
     assert not guard_sql("SELECT member_id, mrn FROM members", role="analyst").ok
     assert not guard_sql("SELECT member_id FROM members WHERE dob < '1960-01-01'", role="analyst").ok
     assert not guard_sql("SELECT * FROM members", role="analyst").ok
-    assert not guard_sql("SELECT (SELECT npi FROM providers LIMIT 1)", role="siu_lead").ok  # nested in a subquery
+    assert not guard_sql("SELECT (SELECT npi FROM providers LIMIT 1)", role="siu_lead").ok
     assert not guard_sql("SELECT name, bank_account_last4 FROM vendors", role="siu_lead").ok
 
 
 def test_count_star_is_not_a_projection_star():
     assert guard_sql("SELECT COUNT(*) AS n FROM members", role="analyst").ok
-    assert guard_sql("SELECT * FROM cases", role="analyst").ok   # no restricted columns on cases
+    assert guard_sql("SELECT * FROM cases", role="analyst").ok
 
 
 def test_role_permissions_and_approval_flag():
@@ -42,7 +42,7 @@ def test_limit_is_added_and_capped():
     assert r.ok and r.sql.endswith("LIMIT 50")
     r = guard_sql("SELECT period FROM claims LIMIT 9999", role="analyst", max_rows=50)
     assert r.ok and r.sql.endswith("LIMIT 50")
-    r = guard_sql("SELECT period FROM claims LIMIT 5", role="analyst", max_rows=50)  # under the cap: left alone
+    r = guard_sql("SELECT period FROM claims LIMIT 5", role="analyst", max_rows=50)
     assert r.ok and r.sql.endswith("LIMIT 5")
 
 

@@ -8,7 +8,7 @@ def test_parse_sections_hierarchy_and_xrefs():
     doc = load_default()
     assert doc.get("3.2").parent_id == "3"
     assert "3.2" in doc.get("3").children
-    assert set(doc.get("5.2").cross_refs) == {"2.1", "6", "8.1"}  # straight from the "see Section ..." text in 5.2
+    assert set(doc.get("5.2").cross_refs) == {"2.1", "6", "8.1"}
     assert doc.breadcrumb("4.1")[0].startswith("4 ")
     assert doc.get("A").title.startswith("Recognized Panel Pairs")
 
@@ -41,5 +41,4 @@ def test_navigator_beats_flat_chunks_on_cross_ref_questions():
 def test_flat_chunks_cover_document():
     doc = load_default()
     retr = FlatChunkRetriever(doc)
-    # the title is part of each chunk, so even a body-less heading section gets one
     assert {c.section_id for c in retr.chunks.values()} == set(doc.sections)
