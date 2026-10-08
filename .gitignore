@@ -5,3 +5,5 @@ __pycache__/
 .env
 *.db
 demo_output.txt
+*.egg-info/
+build/

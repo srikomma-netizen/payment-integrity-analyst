@@ -18,8 +18,11 @@ question -> understand -> guard -> (SIU lead approval?) -> execute -> compose ->
 
 ## Running it
 
+Run these from the repo folder. The `uvicorn` and `scripts/` commands need it; the `python -m` ones work anywhere once the package is installed.
+
 ```bash
 pip install -r requirements.txt
+pip install -e .                            # so the python -m commands work from any folder
 uvicorn api.main:app --reload        # web console at http://localhost:8000
 python scripts/demo.py               # same flows in the terminal
 python -m analyst.evals.run_evals    # golden-set evals
