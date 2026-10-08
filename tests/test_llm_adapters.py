@@ -54,19 +54,19 @@ def test_analyst_refusal_raises():
 def test_navigator_tool_loop_then_structured_answer():
     tool_turn = SimpleNamespace(
         stop_reason="tool_use",
-        content=[SimpleNamespace(type="tool_use", id="tu_1", name="read", input={"section_id": "4.3"})],
+        content=[SimpleNamespace(type="tool_use", id="tu_1", name="read", input={"section_id": "4.1"})],
     )
     final = SimpleNamespace(
         stop_reason="end_turn",
         content=[SimpleNamespace(type="text", text=json.dumps({
-            "answer": "Call back a number on file (Section 4.3).",
-            "citations": ["4.3"], "confidence": "high", "evidence_gaps": []}))],
+            "answer": "Call back a number on file (Section 4.1).",
+            "citations": ["4.1"], "confidence": "high", "evidence_gaps": []}))],
     )
     client = stub_client(create_responses=[tool_turn, final])
     nav = DocumentNavigator(load_default(), AnthropicNavigator(client=client))
     res = nav.ask("vendor bank change?")
 
-    assert res.answer.citations == ["4.3"] and res.sections_read == ["4.3"] and res.iterations == 2
+    assert res.answer.citations == ["4.1"] and res.sections_read == ["4.1"] and res.iterations == 2
     first, second = client.messages.create_calls
     assert first["output_config"]["format"]["type"] == "json_schema"
     assert all(t["strict"] for t in first["tools"])

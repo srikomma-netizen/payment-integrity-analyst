@@ -99,6 +99,7 @@ class DocumentTools:
             "breadcrumb": " > ".join(self.doc.breadcrumb(s.id)),
             "text": s.text,
             "cross_references": s.cross_refs,
+            "cited_by": self.doc.cited_by(s.id),
             "children": s.children,
             "previous": prev_id,
             "next": next_id,
@@ -127,7 +128,7 @@ class DocumentTools:
             },
             {
                 "name": "read",
-                "description": "Read one section in full with its breadcrumb, neighbours and cross-references. Follow cross-references that matter to the question.",
+                "description": "Read one section in full with its breadcrumb, neighbours, cross-references, and the sections that cite it. Follow links that matter to the question.",
                 "strict": True,
                 "input_schema": {
                     "type": "object",

@@ -16,45 +16,45 @@ def make_agent(conn, playbook):
 
 def test_happy_path_returns_grounded_answer(conn):
     agent = make_agent(conn, {
-        "how many vendors do we have": QueryPlan(intent="count vendors", tables=["vendors"],
-                                                 sql="SELECT COUNT(*) AS vendor_count FROM vendors"),
+        "how many providers do we have": QueryPlan(intent="count providers", tables=["providers"],
+                                                   sql="SELECT COUNT(*) AS provider_count FROM providers"),
     })
-    s = agent.ask("How many vendors do we have?")
+    s = agent.ask("How many providers do we have?")
     assert s.status == "done"
-    assert s.rows == [[8]]
+    assert s.rows == [[6]]
     assert s.grounded is True
-    assert "8" in s.answer
+    assert "6" in s.answer
     assert s.sql.endswith("LIMIT 200")
 
 
 def test_guard_rejection_feeds_back_and_retries(conn):
     agent = make_agent(conn, {
-        "vendor bank details": [
-            QueryPlan(intent="x", sql="SELECT name, bank_account_last4 FROM vendors"),
-            QueryPlan(intent="x", sql="SELECT name, country FROM vendors"),
+        "member details": [
+            QueryPlan(intent="x", sql="SELECT member_id, mrn FROM members"),
+            QueryPlan(intent="x", sql="SELECT member_id, plan FROM members"),
         ],
     })
-    s = agent.ask("Vendor bank details")
+    s = agent.ask("Member details")
     assert s.status == "done" and s.attempts == 2
     _, feedback = agent.llm.calls[1]
-    assert "restricted column" in feedback
-    assert all("4421" not in str(r) for r in s.rows)
+    assert "restricted column 'mrn'" in feedback
+    assert all(not str(v).startswith("MRN") for r in s.rows for v in r)
 
 
 def test_gives_up_after_max_attempts(conn):
-    agent = make_agent(conn, {"bad": QueryPlan(intent="x", sql="DELETE FROM vendors")})
+    agent = make_agent(conn, {"bad": QueryPlan(intent="x", sql="DELETE FROM cases")})
     s = agent.ask("bad")
     assert s.status == "failed" and "3 attempts" in s.error
 
 
 def test_runtime_sql_error_is_retried(conn):
     agent = make_agent(conn, {
-        "overdue count": [
-            QueryPlan(intent="x", sql="SELECT COUNT(*) FROM invoices WHERE stat = 'overdue'"),
-            QueryPlan(intent="x", sql="SELECT COUNT(*) AS n FROM invoices WHERE status = 'overdue'"),
+        "open case count": [
+            QueryPlan(intent="x", sql="SELECT COUNT(*) FROM cases WHERE stat = 'open'"),
+            QueryPlan(intent="x", sql="SELECT COUNT(*) AS n FROM cases WHERE status = 'open'"),
         ],
     })
-    s = agent.ask("overdue count")
+    s = agent.ask("open case count")
     assert s.status == "done" and s.attempts == 2
     assert "no such column" in agent.llm.calls[1][1]
 
@@ -69,22 +69,22 @@ def test_refusal_and_clarification_do_not_touch_db(conn):
     assert s2.status == "needs_clarification" and "?" in s2.answer
 
 
-def test_payroll_requires_approval_then_runs(conn):
+def test_notes_require_approval_then_run(conn):
     agent = make_agent(conn, {
-        "headcount": QueryPlan(intent="x", sql="SELECT SUM(headcount) AS total FROM payroll WHERE period='2025-06'"),
+        "notes": QueryPlan(intent="x", sql="SELECT COUNT(*) AS total FROM investigator_notes"),
     })
-    paused = agent.ask("headcount", role="finance_manager")
+    paused = agent.ask("notes", role="siu_lead")
     assert paused.status == "awaiting_approval" and paused.rows == []
     done = agent.decide(paused.run_id, approved=True)
     assert done.status == "done" and done.rows[0][0] > 0
     # analyst role is denied by the guard before any approval question arises
-    denied = agent.ask("headcount", role="analyst")
+    denied = agent.ask("notes", role="analyst")
     assert denied.status == "failed" and "not permitted" in denied.error
 
 
 def test_groundedness_check():
-    cols, rows = ["cost_center", "total_spend"], [["Engineering", 96646.55], ["Sales", 74080.01]]
-    assert is_grounded("Engineering spent $96,646.55 and Sales $74,080.01 (2 rows).", cols, rows)[0]
-    assert is_grounded("Engineering spent about 96.6k.", cols, rows)[0]
-    ok, bad = is_grounded("Engineering spent 120,000.", cols, rows)
-    assert not ok and bad == [120000.0]
+    cols, rows = ["provider", "total_billed"], [["Lakeside Family Clinic", 13029.3], ["Northshore Diagnostics", 12990.41]]
+    assert is_grounded("Lakeside billed $13,029.30 and Northshore $12,990.41 (2 rows).", cols, rows)[0]
+    assert is_grounded("Lakeside billed about 13k.", cols, rows)[0]
+    ok, bad = is_grounded("Lakeside billed 20,000.", cols, rows)
+    assert not ok and bad == [20000.0]

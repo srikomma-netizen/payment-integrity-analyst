@@ -1,9 +1,12 @@
-"""Synthetic finance warehouse (SQLite).
+"""Synthetic healthcare payment-integrity mart (SQLite).
 
-Deterministic seed so eval expectations are reproducible. No real data.
-Tables mirror a small accounting mart: GL entries, invoices, vendors,
-cost centers, budgets, plus a *restricted* payroll table used to
-demonstrate role-based access and human approval.
+Deterministic seed so eval expectations are reproducible. No real data,
+no real PHI. The shape mirrors the analytics layer investigators query:
+claims and payments, the providers and vendors behind them, the risk flags
+raised by upstream controls, and the investigation cases those flags
+became. `members`, `providers` and `vendors` carry restricted identifier
+columns to demonstrate column-level controls, and `investigator_notes` is
+a sensitive table that requires SIU-lead role plus human approval.
 """
 from __future__ import annotations
 
@@ -14,145 +17,198 @@ from dataclasses import dataclass
 
 PERIODS = [f"2025-{m:02d}" for m in range(1, 7)]
 
-COST_CENTERS = [
-    ("CC100", "Engineering", "NA", "A. Rivera"),
-    ("CC200", "Marketing", "NA", "J. Chen"),
-    ("CC300", "Operations", "EMEA", "M. Okafor"),
-    ("CC400", "Finance", "NA", "S. Patel"),
-    ("CC500", "Sales", "APAC", "L. Tanaka"),
+PROVIDERS = [
+    ("PRV-500", "Lakeside Family Clinic", "Primary Care", "IL"),
+    ("PRV-501", "Northshore Diagnostics", "Laboratory", "IL"),
+    ("PRV-502", "Prairie Imaging Center", "Radiology", "WI"),
+    ("PRV-503", "Riverbend Cardiology", "Cardiology", "IL"),
+    ("PRV-504", "Oakline Medical Group", "Primary Care", "IN"),
+    ("PRV-505", "Harbor Orthopedics", "Orthopedics", "IL"),
 ]
 
 VENDORS = [
-    ("V001", "CloudStack Inc", "US", "Software", "4421"),
-    ("V002", "Northwind Travel", "US", "Travel", "9930"),
-    ("V003", "Helix Contractors", "GB", "Contractors", "1182"),
-    ("V004", "Metro Facilities", "US", "Facilities", "7705"),
-    ("V005", "DataForge Ltd", "IE", "Software", "3310"),
-    ("V006", "Apex Consulting", "SG", "Contractors", "5566"),
-    ("V007", "Brightline Media", "US", "Marketing", "2208"),
-    ("V008", "Orbital Office", "DE", "Facilities", "6641"),
+    ("VND-700", "MedSupply Partners", "Medical Supplies", "US"),
+    ("VND-701", "ClearPath Billing Services", "Billing", "US"),
+    ("VND-702", "Summit Facilities", "Facilities", "US"),
+    ("VND-703", "Aster Pharma Distribution", "Pharmaceuticals", "IE"),
 ]
 
-ACCOUNTS = {
-    "6100": ("Software & Subscriptions", "Software"),
-    "6200": ("Travel & Entertainment", "Travel"),
-    "6300": ("Contractors & Consulting", "Contractors"),
-    "6400": ("Facilities & Rent", "Facilities"),
-    "6500": ("Marketing Programs", "Marketing"),
+PROCEDURES = {
+    "99213": ("Office visit, established patient", 110.0),
+    "99214": ("Office visit, moderate complexity", 165.0),
+    "99215": ("Office visit, high complexity", 230.0),
+    "80053": ("Comprehensive metabolic panel", 48.0),
+    "85025": ("Complete blood count", 32.0),
+    "71046": ("Chest X-ray, two views", 95.0),
+    "93000": ("Electrocardiogram", 70.0),
+    "29881": ("Knee arthroscopy", 2_400.0),
+}
+
+RULES = {
+    "R1": ("duplicate_payment", "high"),
+    "R2": ("amount_outlier", "medium"),
+    "R3": ("unbundling", "medium"),
+    "R4": ("prior_confirmed_case", "medium"),
+    "R5": ("unverified_bank_change", "high"),
 }
 
 SCHEMA_SQL = """
-CREATE TABLE cost_centers (
-    cost_center_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
+CREATE TABLE members (
+    member_id TEXT PRIMARY KEY,
+    plan TEXT NOT NULL,
     region TEXT NOT NULL,
-    owner TEXT NOT NULL
+    mrn TEXT NOT NULL,
+    dob TEXT NOT NULL
+);
+CREATE TABLE providers (
+    provider_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    specialty TEXT NOT NULL,
+    state TEXT NOT NULL,
+    npi TEXT NOT NULL
 );
 CREATE TABLE vendors (
     vendor_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    country TEXT NOT NULL,
     category TEXT NOT NULL,
+    country TEXT NOT NULL,
     bank_account_last4 TEXT NOT NULL
 );
-CREATE TABLE gl_entries (
-    entry_id INTEGER PRIMARY KEY,
-    posted_date TEXT NOT NULL,
-    period TEXT NOT NULL,
-    account_code TEXT NOT NULL,
-    account_name TEXT NOT NULL,
-    cost_center_id TEXT NOT NULL REFERENCES cost_centers(cost_center_id),
+CREATE TABLE claims (
+    claim_id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(member_id),
+    provider_id TEXT REFERENCES providers(provider_id),
     vendor_id TEXT REFERENCES vendors(vendor_id),
-    amount_usd REAL NOT NULL,
-    description TEXT
-);
-CREATE TABLE invoices (
-    invoice_id TEXT PRIMARY KEY,
-    vendor_id TEXT NOT NULL REFERENCES vendors(vendor_id),
-    cost_center_id TEXT NOT NULL REFERENCES cost_centers(cost_center_id),
-    invoice_date TEXT NOT NULL,
-    due_date TEXT NOT NULL,
-    paid_date TEXT,
-    amount_usd REAL NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('paid','open','overdue'))
-);
-CREATE TABLE budgets (
+    service_date TEXT NOT NULL,
     period TEXT NOT NULL,
-    cost_center_id TEXT NOT NULL,
-    account_code TEXT NOT NULL,
-    budget_usd REAL NOT NULL,
-    PRIMARY KEY (period, cost_center_id, account_code)
+    claim_type TEXT NOT NULL CHECK (claim_type IN ('professional','facility','vendor')),
+    procedure_code TEXT NOT NULL,
+    procedure_desc TEXT NOT NULL,
+    billed_amount REAL NOT NULL,
+    paid_amount REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('paid','denied','pended'))
 );
-CREATE TABLE payroll (
-    period TEXT NOT NULL,
-    cost_center_id TEXT NOT NULL,
-    headcount INTEGER NOT NULL,
-    total_comp_usd REAL NOT NULL,
-    PRIMARY KEY (period, cost_center_id)
+CREATE TABLE payments (
+    payment_id TEXT PRIMARY KEY,
+    claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+    paid_date TEXT NOT NULL,
+    amount REAL NOT NULL,
+    payee_id TEXT NOT NULL,
+    method TEXT NOT NULL
+);
+CREATE TABLE risk_flags (
+    flag_id TEXT PRIMARY KEY,
+    claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+    rule_id TEXT NOT NULL,
+    signal_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    score REAL NOT NULL,
+    flagged_date TEXT NOT NULL
+);
+CREATE TABLE cases (
+    case_id TEXT PRIMARY KEY,
+    claim_id TEXT NOT NULL REFERENCES claims(claim_id),
+    opened_date TEXT NOT NULL,
+    closed_date TEXT,
+    status TEXT NOT NULL CHECK (status IN ('open','closed')),
+    outcome TEXT CHECK (outcome IN ('confirmed','false_positive','closed_no_action')),
+    investigator TEXT NOT NULL,
+    recovery_amount REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE investigator_notes (
+    note_id INTEGER PRIMARY KEY,
+    case_id TEXT NOT NULL REFERENCES cases(case_id),
+    author TEXT NOT NULL,
+    note TEXT NOT NULL
 );
 """
 
 
 def _seed(conn: sqlite3.Connection, seed: int = 7) -> None:
     rng = random.Random(seed)
-    conn.executemany("INSERT INTO cost_centers VALUES (?,?,?,?)", COST_CENTERS)
-    conn.executemany("INSERT INTO vendors VALUES (?,?,?,?,?)", VENDORS)
+    for i in range(40):
+        conn.execute("INSERT INTO members VALUES (?,?,?,?,?)",
+                     (f"MBR-{2000 + i}", rng.choice(["PPO-Gold", "HMO-Silver", "PPO-Bronze"]),
+                      rng.choice(["IL", "WI", "IN"]), f"MRN{rng.randint(1_000_000, 9_999_999)}",
+                      f"19{rng.randint(45, 99):02d}-{rng.randint(1, 12):02d}-{rng.randint(1, 28):02d}"))
+    for pid, name, spec, state in PROVIDERS:
+        conn.execute("INSERT INTO providers VALUES (?,?,?,?,?)", (pid, name, spec, state, f"{rng.randint(10**9, 10**10 - 1)}"))
+    for vid, name, cat, country in VENDORS:
+        conn.execute("INSERT INTO vendors VALUES (?,?,?,?,?)", (vid, name, cat, country, f"{rng.randint(1000, 9999)}"))
 
-    vendors_by_cat: dict[str, list[str]] = {}
-    for vid, _, _, cat, _ in VENDORS:
-        vendors_by_cat.setdefault(cat, []).append(vid)
-
-    entry_id = 1
+    claim_no = 1000
+    flag_no = 1
     for period in PERIODS:
         month = int(period[-2:])
-        for cc_id, *_ in COST_CENTERS:
-            for code, (acct_name, cat) in ACCOUNTS.items():
-                budget = round(rng.uniform(8_000, 40_000), 2)
-                conn.execute("INSERT INTO budgets VALUES (?,?,?,?)", (period, cc_id, code, budget))
-                n_entries = rng.randint(1, 3)
-                for _ in range(n_entries):
-                    day = rng.randint(1, 28)
-                    amount = round(budget / n_entries * rng.uniform(0.6, 1.3), 2)
-                    vendor = rng.choice(vendors_by_cat[cat])
-                    conn.execute(
-                        "INSERT INTO gl_entries VALUES (?,?,?,?,?,?,?,?,?)",
-                        (entry_id, f"2025-{month:02d}-{day:02d}", period, code, acct_name,
-                         cc_id, vendor, amount, f"{acct_name} - {vendor}"),
-                    )
-                    entry_id += 1
-
-    inv_id = 1
-    for period in PERIODS:
-        month = int(period[-2:])
-        for _ in range(7):
-            vid, _, _, cat, _ = rng.choice(VENDORS)
-            cc_id = rng.choice(COST_CENTERS)[0]
-            inv_day = rng.randint(1, 25)
-            invoice_date = f"2025-{month:02d}-{inv_day:02d}"
-            due_month = min(month + 1, 7)
-            due_date = f"2025-{due_month:02d}-{inv_day:02d}"
-            amount = round(rng.uniform(1_500, 60_000), 2)
+        for _ in range(45):
+            claim_no += 1
+            cid = f"CLM-{claim_no}"
+            code = rng.choice(list(PROCEDURES))
+            desc, base = PROCEDURES[code]
+            provider = rng.choice(PROVIDERS)[0]
+            vendor = None
+            claim_type = "professional"
+            if rng.random() < 0.12:            # vendor / facility invoice lines
+                vendor, provider, claim_type = rng.choice(VENDORS)[0], None, "vendor"
+                code, desc, base = "FAC-INV", "Facilities invoice", 18_000.0
+            day = rng.randint(1, 28)
+            billed = round(base * rng.uniform(0.85, 1.2), 2)
             roll = rng.random()
-            if roll < 0.7:
-                status = "paid"
-                paid_date = f"2025-{due_month:02d}-{max(1, inv_day - rng.randint(0, 10)):02d}"
-            elif roll < 0.85:
-                status, paid_date = "open", None
-            else:
-                status, paid_date = "overdue", None
-            conn.execute(
-                "INSERT INTO invoices VALUES (?,?,?,?,?,?,?,?)",
-                (f"INV-{inv_id:04d}", vid, cc_id, invoice_date, due_date, paid_date, amount, status),
-            )
-            inv_id += 1
+            status = "paid" if roll < 0.82 else "denied" if roll < 0.92 else "pended"
+            paid = round(billed * rng.uniform(0.7, 1.0), 2) if status == "paid" else 0.0
+            # planted anomalies
+            flags: list[tuple[str, float]] = []
+            if claim_type == "professional" and code == "99215" and rng.random() < 0.35:
+                billed = round(base * rng.uniform(2.5, 3.2), 2); paid = round(billed * 0.9, 2) if status == "paid" else 0.0
+                flags.append(("R2", round(rng.uniform(0.5, 0.9), 2)))
+            if claim_type == "professional" and code in ("80053", "85025") and rng.random() < 0.3:
+                flags.append(("R3", 0.55))
+            if provider == "PRV-500" and rng.random() < 0.4:
+                flags.append(("R4", 0.4))
+            if claim_type == "vendor" and vendor == "VND-702" and rng.random() < 0.6:
+                flags.append(("R5", 0.85))
+            conn.execute("INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (cid, f"MBR-{2000 + rng.randint(0, 39)}", provider, vendor,
+                          f"2025-{month:02d}-{day:02d}", period, claim_type, code, desc, billed, paid, status))
+            if status == "paid":
+                payee = provider or vendor
+                conn.execute("INSERT INTO payments VALUES (?,?,?,?,?,?)",
+                             (f"PAY-{claim_no}A", cid, f"2025-{month:02d}-{min(28, day + 7):02d}", paid, payee, "ACH"))
+                if rng.random() < 0.05:        # duplicate disbursement
+                    conn.execute("INSERT INTO payments VALUES (?,?,?,?,?,?)",
+                                 (f"PAY-{claim_no}B", cid, f"2025-{month:02d}-{min(28, day + 9):02d}", paid, payee, "ACH"))
+                    flags.append(("R1", 0.8))
+            for rule, score in flags:
+                sig, sev = RULES[rule]
+                conn.execute("INSERT INTO risk_flags VALUES (?,?,?,?,?,?,?)",
+                             (f"FLG-{flag_no:04d}", cid, rule, sig, sev, score, f"2025-{month:02d}-{min(28, day + 10):02d}"))
+                flag_no += 1
 
-    for period in PERIODS:
-        for cc_id, *_ in COST_CENTERS:
-            headcount = rng.randint(8, 60)
-            conn.execute(
-                "INSERT INTO payroll VALUES (?,?,?,?)",
-                (period, cc_id, headcount, round(headcount * rng.uniform(9_000, 14_000), 2)),
-            )
+    # cases: one per flagged claim with prob, with outcomes and notes
+    investigators = ["inv_4", "inv_7", "inv_9", "lead_2"]
+    case_no = 400
+    for (cid, flagged_date) in conn.execute("SELECT DISTINCT claim_id, MIN(flagged_date) FROM risk_flags GROUP BY claim_id").fetchall():
+        if rng.random() < 0.8:
+            case_no += 1
+            case_id = f"PC-{case_no:04d}"
+            month = int(flagged_date[5:7])
+            opened = flagged_date
+            if rng.random() < 0.7:
+                status = "closed"
+                outcome = rng.choices(["confirmed", "false_positive", "closed_no_action"], [0.45, 0.35, 0.2])[0]
+                closed = f"2025-{min(7, month + rng.randint(0, 1)):02d}-{rng.randint(1, 28):02d}"
+                if closed <= opened:
+                    closed = f"2025-{min(7, month + 1):02d}-{rng.randint(1, 28):02d}"
+                recovery = round(rng.uniform(150, 4_500), 2) if outcome == "confirmed" else 0.0
+            else:
+                status, outcome, closed, recovery = "open", None, None, 0.0
+            conn.execute("INSERT INTO cases VALUES (?,?,?,?,?,?,?,?)",
+                         (case_id, cid, opened, closed, status, outcome, rng.choice(investigators), recovery))
+            conn.execute("INSERT INTO investigator_notes (case_id, author, note) VALUES (?,?,?)",
+                         (case_id, rng.choice(investigators),
+                          rng.choice(["Requested medical records from provider.", "Call-back to vendor completed; details verified.",
+                                      "Resubmission after portal timeout; single payment confirmed.", "Chart supports billed level; closing.",
+                                      "Escalated to SIU lead pending recovery letter."])))
     conn.commit()
 
 

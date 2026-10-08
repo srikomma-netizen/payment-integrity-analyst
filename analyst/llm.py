@@ -25,7 +25,7 @@ class QueryPlan(BaseModel):
     intent: str = Field(description="One sentence restating the question in business terms.")
     tables: list[str] = Field(default_factory=list, description="Catalog tables the SQL uses.")
     sql: str = Field(default="", description="A single SQLite SELECT statement, or empty if not answerable.")
-    assumptions: list[str] = Field(default_factory=list, description="Interpretation choices made, e.g. 'spend = gl_entries.amount_usd'.")
+    assumptions: list[str] = Field(default_factory=list, description="Interpretation choices made, e.g. 'flagged = at least one risk_flags row'.")
     needs_clarification: bool = Field(default=False, description="True if the question is too ambiguous to answer safely.")
     clarification_question: str = Field(default="", description="The question to ask the user if needs_clarification.")
     refuse: bool = Field(default=False, description="True if the data is not in the catalog or not permitted for this role.")
@@ -46,15 +46,15 @@ class AnalystLLM(Protocol):
     def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft: ...
 
 
-PLAN_SYSTEM = """You are a careful finance data analyst that writes SQL for an accounting mart.
+PLAN_SYSTEM = """You are a careful payment-integrity data analyst that writes SQL for a healthcare claims and investigations mart.
 
 Rules:
 - Use ONLY the tables and columns in the catalog below. Never invent columns.
 - Write exactly one SQLite SELECT statement. No writes, no PRAGMA, no multiple statements.
 - Use the business metric definitions verbatim when the question matches one.
 - Periods are 'YYYY-MM' strings. "Q1" means periods 2025-01, 2025-02, 2025-03; "Q2" means 2025-04..2025-06.
-- Always alias aggregate columns with readable names (e.g. total_spend).
-- Prefer joining to cost_centers / vendors so results show names, not just ids.
+- Always alias aggregate columns with readable names (e.g. flagged_claims).
+- Prefer joining to providers / vendors so results show names, not just ids. Never try to identify members; member_id is the only member field you may return.
 - If the question is ambiguous in a way that changes the answer (e.g. unclear time range when the data spans several periods and none is implied), set needs_clarification=true and ask ONE precise question.
 - If the question needs data that is not in the catalog, or a table marked NOT AVAILABLE, set refuse=true and explain in one sentence. Do not write SQL in that case.
 - Record every interpretation choice in assumptions.
@@ -62,7 +62,7 @@ Rules:
 CATALOG:
 """
 
-ANSWER_SYSTEM = """You write the final answer for a finance analyst.
+ANSWER_SYSTEM = """You write the final answer for a payment-integrity analyst.
 Use ONLY the numbers in the result rows you are given. Do not compute new numbers that are not present
 (you may restate a number with rounding or commas). If the result is empty, say so plainly.
 Mention the time range and any filters that were applied. Keep it under 120 words."""
@@ -129,7 +129,7 @@ class FakeAnalystLLM:
 
     def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan:
         self.calls.append((question, feedback))
-        # role-specific entry wins ("finance_manager::question"), then the generic one
+        # role-specific entry wins ("siu_lead::question"), then the generic one
         key = self._norm(question)
         entry = self.playbook.get(f"{role}::{key}", self.playbook.get(key))
         if entry is None:

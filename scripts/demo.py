@@ -38,19 +38,20 @@ def main() -> None:
     print(f"LLM provider: {type(llm).__name__}")
     agent = AnalystAgent(conn, llm)
 
-    show(agent.ask("What was total spend by cost center in March 2025?"))
-    show(agent.ask("How many invoices are overdue?"))                       # self-corrects after a runtime error
-    show(agent.ask("List each vendor's bank account number."))              # guard blocks restricted column
-    show(agent.ask("What is total compensation by cost center in June 2025?", role="analyst"))
+    show(agent.ask("How many claims were flagged by each risk rule in March 2025?"))
+    show(agent.ask("How many duplicate payments were made and what was the total overpaid amount?"))
+    show(agent.ask("How many open cases are there?"))                              # self-corrects after a runtime error
+    show(agent.ask("List the medical record numbers of members with flagged claims."))   # guard blocks PHI column
+    show(agent.ask("Show the investigator notes for open cases.", role="analyst"))
 
-    paused = agent.ask("What is total compensation by cost center in June 2025?", role="finance_manager")
+    paused = agent.ask("Show the investigator notes for open cases.", role="siu_lead")
     show(paused)
-    print("\n... human approves ...")
+    print("\n... SIU lead approves ...")
     show(agent.decide(paused.run_id, approved=True))
 
     print("\n\n=== Policy navigation ===")
     nav = DocumentNavigator(load_default())
-    res = nav.ask("Can a 45,000 USD software subscription renewal be paid without a purchase order?")
+    res = nav.ask("A claim was paid twice after a portal resubmission. Can we auto-recover, and when does an investigator need to approve?")
     for c in res.tool_calls:
         print(f"   {c.name}({c.args}) -> {c.result_summary}")
     print(f"sections read: {res.sections_read}")

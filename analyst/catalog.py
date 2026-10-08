@@ -4,7 +4,8 @@ schema retrieval.
 The LLM never sees the raw database. It sees a curated catalog with
 business definitions, and only the slice of it that is relevant to the
 question. Access control lives here (table-level and column-level) and is
-enforced deterministically by `guard.py`, not by the prompt.
+enforced deterministically by `guard.py`, not by the prompt. PHI columns
+are marked restricted and are never rendered into the prompt at all.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ class Table:
     description: str
     columns: tuple[Column, ...]
     keywords: tuple[str, ...]
-    allowed_roles: tuple[str, ...] = ("analyst", "finance_manager")
+    allowed_roles: tuple[str, ...] = ("analyst", "siu_lead")
     requires_approval: bool = False  # human checkpoint before execution
 
 
@@ -39,100 +40,133 @@ class Metric:
 
 
 TABLES: dict[str, Table] = {
-    "cost_centers": Table(
-        "cost_centers",
-        "One row per cost center (department). Join key for spend, budgets, payroll.",
+    "members": Table(
+        "members",
+        "One row per plan member. mrn and dob are PHI and RESTRICTED: never select or filter on them.",
         (
-            Column("cost_center_id", "TEXT", "Primary key, e.g. CC100"),
-            Column("name", "TEXT", "Department name: Engineering, Marketing, Operations, Finance, Sales"),
-            Column("region", "TEXT", "NA, EMEA, or APAC"),
-            Column("owner", "TEXT", "Budget owner"),
+            Column("member_id", "TEXT", "Pseudonymous key, e.g. MBR-2001"),
+            Column("plan", "TEXT", "PPO-Gold, HMO-Silver, PPO-Bronze"),
+            Column("region", "TEXT", "IL, WI, IN"),
+            Column("mrn", "TEXT", "Medical record number (PHI)", restricted=True),
+            Column("dob", "TEXT", "Date of birth (PHI)", restricted=True),
         ),
-        ("cost center", "department", "team", "region", "owner", "engineering", "marketing",
-         "operations", "finance", "sales", "emea", "apac", "na"),
+        ("member", "patient", "plan", "region"),
+    ),
+    "providers": Table(
+        "providers",
+        "Provider master. npi is RESTRICTED.",
+        (
+            Column("provider_id", "TEXT", "Primary key, e.g. PRV-500"),
+            Column("name", "TEXT", "Practice name"),
+            Column("specialty", "TEXT", "Primary Care, Laboratory, Radiology, Cardiology, Orthopedics"),
+            Column("state", "TEXT", "IL, WI, IN"),
+            Column("npi", "TEXT", "National provider identifier", restricted=True),
+        ),
+        ("provider", "practice", "clinic", "specialty", "physician", "who billed"),
     ),
     "vendors": Table(
         "vendors",
-        "Approved vendor master. bank_account_last4 is RESTRICTED and must never be selected.",
+        "Vendor master for facility and supply invoices. bank_account_last4 is RESTRICTED.",
         (
-            Column("vendor_id", "TEXT", "Primary key, e.g. V001"),
+            Column("vendor_id", "TEXT", "Primary key, e.g. VND-700"),
             Column("name", "TEXT", "Legal vendor name"),
+            Column("category", "TEXT", "Medical Supplies, Billing, Facilities, Pharmaceuticals"),
             Column("country", "TEXT", "ISO-2 country code"),
-            Column("category", "TEXT", "Software, Travel, Contractors, Facilities, Marketing"),
-            Column("bank_account_last4", "TEXT", "Restricted banking detail", restricted=True),
+            Column("bank_account_last4", "TEXT", "Banking detail", restricted=True),
         ),
-        ("vendor", "supplier", "country", "category", "who do we pay"),
+        ("vendor", "supplier", "invoice", "bank"),
     ),
-    "gl_entries": Table(
-        "gl_entries",
-        "General-ledger operating-expense lines. One row per posting. amount_usd is positive expense.",
+    "claims": Table(
+        "claims",
+        "One row per adjudicated claim line. billed_amount is what was submitted; paid_amount is what was disbursed (0 unless status='paid').",
         (
-            Column("entry_id", "INTEGER", "Primary key"),
-            Column("posted_date", "TEXT", "ISO date YYYY-MM-DD"),
-            Column("period", "TEXT", "Accounting period YYYY-MM (2025-01 .. 2025-06)"),
-            Column("account_code", "TEXT", "6100 Software, 6200 Travel, 6300 Contractors, 6400 Facilities, 6500 Marketing"),
-            Column("account_name", "TEXT", "Human-readable account name"),
-            Column("cost_center_id", "TEXT", "FK cost_centers"),
-            Column("vendor_id", "TEXT", "FK vendors (nullable)"),
-            Column("amount_usd", "REAL", "Expense amount in USD"),
-            Column("description", "TEXT", "Free text"),
+            Column("claim_id", "TEXT", "Primary key CLM-1001"),
+            Column("member_id", "TEXT", "FK members"),
+            Column("provider_id", "TEXT", "FK providers (NULL for vendor claims)"),
+            Column("vendor_id", "TEXT", "FK vendors (NULL for professional claims)"),
+            Column("service_date", "TEXT", "ISO date"),
+            Column("period", "TEXT", "YYYY-MM (2025-01 .. 2025-06)"),
+            Column("claim_type", "TEXT", "professional | facility | vendor"),
+            Column("procedure_code", "TEXT", "CPT code, e.g. 99215, 80053; FAC-INV for vendor invoices"),
+            Column("procedure_desc", "TEXT", "Human-readable procedure"),
+            Column("billed_amount", "REAL", "Submitted amount USD"),
+            Column("paid_amount", "REAL", "Disbursed amount USD"),
+            Column("status", "TEXT", "paid | denied | pended"),
         ),
-        ("spend", "expense", "opex", "cost", "gl", "ledger", "account", "software", "travel",
-         "contractor", "facilities", "marketing", "period", "month", "quarter", "trend"),
+        ("claim", "claims", "billed", "paid", "procedure", "cpt", "service", "period", "month", "quarter", "trend", "denied", "pended"),
     ),
-    "invoices": Table(
-        "invoices",
-        "Accounts-payable invoices. status is paid / open / overdue. paid_date is NULL unless paid.",
+    "payments": Table(
+        "payments",
+        "Disbursements. A claim with more than one payment row is a duplicate payment.",
         (
-            Column("invoice_id", "TEXT", "Primary key INV-0001"),
-            Column("vendor_id", "TEXT", "FK vendors"),
-            Column("cost_center_id", "TEXT", "FK cost_centers"),
-            Column("invoice_date", "TEXT", "ISO date"),
-            Column("due_date", "TEXT", "ISO date"),
-            Column("paid_date", "TEXT", "ISO date or NULL"),
-            Column("amount_usd", "REAL", "Invoice amount in USD"),
-            Column("status", "TEXT", "paid | open | overdue"),
+            Column("payment_id", "TEXT", "Primary key PAY-1001A"),
+            Column("claim_id", "TEXT", "FK claims"),
+            Column("paid_date", "TEXT", "ISO date"),
+            Column("amount", "REAL", "Amount USD"),
+            Column("payee_id", "TEXT", "provider_id or vendor_id paid"),
+            Column("method", "TEXT", "ACH | WIRE | CHECK"),
         ),
-        ("invoice", "payable", "ap", "overdue", "open", "paid", "due", "late", "aging", "dpo"),
+        ("payment", "payments", "disbursement", "duplicate", "overpaid", "overpayment", "paid twice"),
     ),
-    "budgets": Table(
-        "budgets",
-        "Monthly budget per cost center and account code. Compare with gl_entries for variance.",
+    "risk_flags": Table(
+        "risk_flags",
+        "Signals raised by upstream risk rules. One row per (claim, rule). Rules: R1 duplicate_payment, R2 amount_outlier, R3 unbundling, R4 prior_confirmed_case, R5 unverified_bank_change.",
         (
-            Column("period", "TEXT", "YYYY-MM"),
-            Column("cost_center_id", "TEXT", "FK cost_centers"),
-            Column("account_code", "TEXT", "Same codes as gl_entries"),
-            Column("budget_usd", "REAL", "Budgeted amount"),
+            Column("flag_id", "TEXT", "Primary key"),
+            Column("claim_id", "TEXT", "FK claims"),
+            Column("rule_id", "TEXT", "R1..R5"),
+            Column("signal_type", "TEXT", "duplicate_payment | amount_outlier | unbundling | prior_confirmed_case | unverified_bank_change"),
+            Column("severity", "TEXT", "low | medium | high"),
+            Column("score", "REAL", "0..1 model score"),
+            Column("flagged_date", "TEXT", "ISO date"),
         ),
-        ("budget", "variance", "over budget", "under budget", "plan", "forecast"),
+        ("flag", "flagged", "flags", "rule", "signal", "risk", "alert", "upcoding", "unbundling", "outlier", "bank change"),
     ),
-    "payroll": Table(
-        "payroll",
-        "Headcount and total compensation per cost center per period. SENSITIVE: finance_manager only, requires human approval.",
+    "cases": Table(
+        "cases",
+        "Investigation cases opened from flagged claims. outcome is NULL while status='open'.",
         (
-            Column("period", "TEXT", "YYYY-MM"),
-            Column("cost_center_id", "TEXT", "FK cost_centers"),
-            Column("headcount", "INTEGER", "Employees on payroll"),
-            Column("total_comp_usd", "REAL", "Total compensation paid"),
+            Column("case_id", "TEXT", "Primary key PC-0401"),
+            Column("claim_id", "TEXT", "FK claims"),
+            Column("opened_date", "TEXT", "ISO date"),
+            Column("closed_date", "TEXT", "ISO date or NULL"),
+            Column("status", "TEXT", "open | closed"),
+            Column("outcome", "TEXT", "confirmed | false_positive | closed_no_action | NULL"),
+            Column("investigator", "TEXT", "Assigned investigator id"),
+            Column("recovery_amount", "REAL", "USD recovered (confirmed cases)"),
         ),
-        ("payroll", "headcount", "compensation", "salary", "comp", "employees"),
-        allowed_roles=("finance_manager",),
+        ("case", "cases", "investigation", "investigator", "outcome", "false positive", "confirmed", "recovery", "recovered", "days to close", "open cases", "backlog"),
+    ),
+    "investigator_notes": Table(
+        "investigator_notes",
+        "Free-text investigator notes. SENSITIVE: siu_lead only, requires human approval.",
+        (
+            Column("note_id", "INTEGER", "Primary key"),
+            Column("case_id", "TEXT", "FK cases"),
+            Column("author", "TEXT", "Investigator id"),
+            Column("note", "TEXT", "Free text"),
+        ),
+        ("note", "notes", "narrative", "comments", "what did the investigator say"),
+        allowed_roles=("siu_lead",),
         requires_approval=True,
     ),
 }
 
 METRICS: list[Metric] = [
-    Metric("total_spend", "Sum of gl_entries.amount_usd for the filters given.",
-           "SUM(gl_entries.amount_usd)", ("spend", "expense", "opex", "cost", "total")),
-    Metric("budget_variance", "Actual spend minus budget for the same period, cost center, and account. Positive = over budget.",
-           "SUM(gl_entries.amount_usd) - SUM(budgets.budget_usd) joined on (period, cost_center_id, account_code)",
-           ("variance", "over budget", "under budget", "vs budget", "against budget")),
-    Metric("open_payables", "Sum of invoices.amount_usd where status IN ('open','overdue').",
-           "SUM(amount_usd) FILTER (WHERE status IN ('open','overdue'))", ("open payables", "outstanding", "unpaid", "owe")),
-    Metric("overdue_rate", "Count of overdue invoices divided by count of all invoices, as a fraction.",
-           "AVG(CASE WHEN status='overdue' THEN 1.0 ELSE 0.0 END)", ("overdue rate", "late rate", "percent overdue")),
-    Metric("avg_days_to_pay", "Average julianday(paid_date) - julianday(invoice_date) over paid invoices.",
-           "AVG(julianday(paid_date) - julianday(invoice_date)) WHERE status='paid'", ("days to pay", "payment cycle", "dpo")),
+    Metric("flag_rate", "Share of claims in scope that have at least one risk flag.",
+           "COUNT(DISTINCT risk_flags.claim_id) * 1.0 / COUNT(DISTINCT claims.claim_id) with a LEFT JOIN from claims to risk_flags",
+           ("flag rate", "share flagged", "percent flagged", "what share")),
+    Metric("false_positive_rate", "Closed cases with outcome='false_positive' divided by all closed cases.",
+           "AVG(CASE WHEN outcome='false_positive' THEN 1.0 ELSE 0.0 END) WHERE status='closed'",
+           ("false positive rate", "false positives", "fp rate")),
+    Metric("duplicate_overpayment", "For claims with more than one payment, the amount beyond the first payment: SUM(amount) - MAX(amount) per claim.",
+           "SELECT claim_id, COUNT(*) n, SUM(amount) - MAX(amount) AS overpaid FROM payments GROUP BY claim_id HAVING n > 1",
+           ("duplicate", "overpaid", "overpayment", "paid twice")),
+    Metric("avg_days_to_close", "Average julianday(closed_date) - julianday(opened_date) over closed cases.",
+           "AVG(julianday(closed_date) - julianday(opened_date)) WHERE status='closed'",
+           ("days to close", "cycle time", "how long")),
+    Metric("recovery_total", "SUM(cases.recovery_amount) for confirmed cases.",
+           "SUM(recovery_amount) WHERE outcome='confirmed'", ("recovery", "recovered", "recoveries")),
 ]
 
 RESTRICTED_COLUMNS: frozenset[str] = frozenset(
@@ -149,11 +183,9 @@ def _tokens(text: str) -> set[str]:
 def select_relevant(question: str, *, max_tables: int = 4) -> list[Table]:
     """Cheap lexical retrieval of candidate tables.
 
-    In production this is an embedding search over the catalog; for a
-    six-table mart a keyword overlap is honest and debuggable. Joins work
-    because join-key tables (cost_centers, vendors) get a small boost when
-    any fact table matches.
-    """
+    In production this is an embedding search over the catalog; for an
+    eight-table mart a keyword overlap is honest and debuggable. `claims`
+    is the hub, so it is added whenever a fact table matches."""
     q = question.lower()
     q_tokens = _tokens(q)
     scored: list[tuple[float, Table]] = []
@@ -168,13 +200,13 @@ def select_relevant(question: str, *, max_tables: int = 4) -> list[Table]:
     scored.sort(key=lambda s: -s[0])
     chosen = [t for s, t in scored if s > 0][:max_tables]
     names = {t.name for t in chosen}
-    if any(n in names for n in ("gl_entries", "invoices", "budgets", "payroll")):
-        for dim in ("cost_centers", "vendors"):
-            if dim not in names and len(chosen) < max_tables + 2:
-                if dim == "vendors" and not any(k in q for k in ("vendor", "supplier", "who")):
-                    continue
+    if names & {"payments", "risk_flags", "cases", "investigator_notes"} and "claims" not in names:
+        chosen.append(TABLES["claims"])
+    if "claims" in {t.name for t in chosen}:
+        for dim, hint in (("providers", "provider"), ("vendors", "vendor")):
+            if dim not in names and hint in q:
                 chosen.append(TABLES[dim])
-    return chosen or [TABLES["gl_entries"], TABLES["cost_centers"]]
+    return chosen or [TABLES["claims"], TABLES["risk_flags"]]
 
 
 def relevant_metrics(question: str) -> list[Metric]:

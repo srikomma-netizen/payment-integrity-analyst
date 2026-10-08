@@ -45,12 +45,12 @@ class NavigatorDriver(Protocol):
     def run(self, question: str, tools: DocumentTools) -> tuple[PolicyAnswer, int]: ...
 
 
-NAV_SYSTEM = """You answer questions about a corporate Expense and Vendor Payment Policy.
+NAV_SYSTEM = """You answer questions about a healthcare Payment Integrity Investigation Policy.
 
 You have three tools: outline, search, read. Work like an auditor:
 1. search with specific terms from the question (amounts, nouns like "purchase order", "bank").
 2. read the most relevant sections IN FULL. Never answer from a search snippet.
-3. If a section you read says "see Section X" or "as defined in Section X" and X matters to the question, read X too.
+3. If a section you read says "see Section X" or "as defined in Section X", or is cited by a section that matters, and that section matters to the question, read it too.
 4. Stop when you can answer every part of the question from text you have read. Do not read the whole document.
 5. Answer with the exact amounts, conditions, and exceptions from the text, and cite section ids.
 If the policy does not address something, say so in evidence_gaps instead of guessing."""
@@ -98,12 +98,14 @@ class AnthropicNavigator:
 
 
 class FakeNavigator:
-    """A scripted navigation policy: search, read top hits, follow
-    cross-references one hop, answer from what was read. Deterministic, so
-    tests can assert on which sections were consulted."""
+    """A scripted navigation policy that behaves like a careful reader:
+    search, read the best hits, then repeatedly follow the most
+    question-relevant link (a cross-reference or a section that cites what
+    was read) until the read budget is spent or no relevant link remains.
+    Deterministic, so tests can assert on which sections were consulted."""
 
-    def __init__(self, top_k: int = 3, follow_refs: int = 3, min_words: int = 10):
-        self.top_k, self.follow_refs, self.min_words = top_k, follow_refs, min_words
+    def __init__(self, top_k: int = 3, follow_budget: int = 4, min_words: int = 10):
+        self.top_k, self.follow_budget, self.min_words = top_k, follow_budget, min_words
 
     def run(self, question: str, tools: DocumentTools) -> tuple[PolicyAnswer, int]:
         hits = tools.search(question, k=6)
@@ -115,12 +117,23 @@ class FakeNavigator:
             if sec is None or sec.word_count() < self.min_words:   # skip bare container headings
                 continue
             read[h["section_id"]] = tools.read(h["section_id"])
-        followed = 0
-        for sec in list(read.values()):
-            for ref in sec["cross_references"]:
-                if ref not in read and followed < self.follow_refs and tools.doc.get(ref):
-                    read[ref] = tools.read(ref)
-                    followed += 1
+
+        for _ in range(self.follow_budget):
+            # explicit "see Section X" links outrank reverse links, as they would for a human reader
+            frontier: dict[str, float] = {}
+            for page in read.values():
+                for ref in page["cross_references"]:
+                    frontier[ref] = max(frontier.get(ref, 0.0), 1.0)
+                for ref in page.get("cited_by", []):
+                    frontier.setdefault(ref, 0.0)
+            scored = sorted(((tools.index.score(question, ref) + bonus, ref) for ref, bonus in frontier.items()
+                             if ref not in read and tools.doc.get(ref) and tools.index.score(question, ref) > 0),
+                            key=lambda x: (-x[0], x[1]))
+            if not scored or scored[0][0] <= 0:
+                break
+            best = scored[0][1]
+            read[best] = tools.read(best)
+
         if not read:
             return PolicyAnswer(answer="The policy does not appear to address this.", citations=[],
                                 confidence="low", evidence_gaps=[question]), 1

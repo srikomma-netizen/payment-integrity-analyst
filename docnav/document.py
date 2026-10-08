@@ -87,6 +87,10 @@ class Document:
     def get(self, sec_id: str) -> Section | None:
         return self.sections.get(sec_id)
 
+    def cited_by(self, sec_id: str) -> list[str]:
+        """Sections whose text references this one (reverse cross-references)."""
+        return [s.id for s in self.ordered if sec_id in s.cross_refs and s.id != sec_id]
+
     def breadcrumb(self, sec_id: str) -> list[str]:
         out, cur = [], self.get(sec_id)
         while cur:
@@ -103,7 +107,7 @@ class Document:
         return "\n".join(f"{'  ' * (s.level - 2)}{s.id} {s.title}" for s in self.ordered)
 
 
-DEFAULT_POLICY = Path(__file__).with_name("data") / "accounting_policy.md"
+DEFAULT_POLICY = Path(__file__).with_name("data") / "payment_integrity_policy.md"
 
 
 def load_default() -> Document:

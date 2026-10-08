@@ -1,7 +1,7 @@
 [project]
 name = "finance-analyst-agent"
 version = "0.1.0"
-description = "Natural-language finance analyst agent: text-to-SQL with deterministic guardrails, evals, agentic policy-document navigation, FastAPI service."
+description = "Natural-language payment-integrity analyst agent: text-to-SQL over a healthcare claims and investigations mart with a deterministic SQL guard, PHI column controls, result-level evals, human-approval interrupts, and agentic policy-document navigation."
 requires-python = ">=3.11"
 
 [tool.pytest.ini_options]

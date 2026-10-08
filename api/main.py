@@ -24,12 +24,12 @@ from analyst.workflow import RunState
 from docnav.document import load_default
 from docnav.navigator import DocumentNavigator
 
-ROLES = ("analyst", "finance_manager")
+ROLES = ("analyst", "siu_lead")
 
 
 class AskRequest(BaseModel):
     question: str = Field(min_length=3, max_length=500)
-    role: str = Field(default="analyst", pattern="^(analyst|finance_manager)$")
+    role: str = Field(default="analyst", pattern="^(analyst|siu_lead)$")
 
 
 class DecisionRequest(BaseModel):
@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
     conn.close()
 
 
-app = FastAPI(title="Finance Analyst Agent", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Payment Integrity Analyst Agent", version="0.1.0", lifespan=lifespan)
 
 
 @app.get("/health")

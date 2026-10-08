@@ -8,24 +8,25 @@ def test_parse_sections_hierarchy_and_xrefs():
     doc = load_default()
     assert doc.get("3.2").parent_id == "3"
     assert "3.2" in doc.get("3").children
-    assert set(doc.get("3.2").cross_refs) == {"2.1", "3.1"}
-    assert doc.breadcrumb("4.3")[0].startswith("4 ")
+    assert set(doc.get("5.2").cross_refs) == {"2.1", "6", "8.1"}
+    assert doc.breadcrumb("4.1")[0].startswith("4 ")
+    assert doc.get("A").title.startswith("Recognized Panel Pairs")
 
 
 def test_tools_search_and_read():
     tools = DocumentTools(load_default())
-    hits = tools.search("bank account change call-back", k=3)
-    assert hits[0]["section_id"] == "4.3"
-    page = tools.read("4.3")
-    assert "call-back" in page["text"] and "9" in page["cross_references"]
+    hits = tools.search("bank detail change call-back", k=3)
+    assert hits[0]["section_id"] == "4.1"
+    page = tools.read("4.1")
+    assert "call-back" in page["text"] and "6" in page["cross_references"]
     assert tools.read("nope").get("error")
     assert [c.name for c in tools.calls] == ["search", "read", "read"]
 
 
 def test_navigator_follows_cross_references():
     nav = DocumentNavigator(load_default(), FakeNavigator())
-    res = nav.ask("A vendor emailed us new bank account details. What must happen before we update them?")
-    assert "4.3" in res.sections_read and "9" in res.sections_read
+    res = nav.ask("A vendor emailed new bank details six days before a 48,000 USD invoice. What must happen before payment?")
+    assert "4.1" in res.sections_read and "6" in res.sections_read
     assert set(res.answer.citations) == set(res.sections_read)
 
 

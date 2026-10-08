@@ -1,209 +1,227 @@
 [
   {
-    "id": "spend_by_cc_march",
-    "question": "What was total spend by cost center in March 2025?",
+    "id": "flags_by_rule_march",
+    "question": "How many claims were flagged by each risk rule in March 2025?",
     "role": "analyst",
     "tags": ["simple", "aggregate", "join"],
     "expect": {
       "status": "done",
-      "reference_sql": "SELECT c.name, SUM(g.amount_usd) FROM gl_entries g JOIN cost_centers c ON c.cost_center_id = g.cost_center_id WHERE g.period = '2025-03' GROUP BY c.name"
+      "reference_sql": "SELECT f.rule_id, COUNT(*) FROM risk_flags f JOIN claims c ON c.claim_id = f.claim_id WHERE c.period = '2025-03' GROUP BY f.rule_id"
     },
     "fake_plans": [
       {
-        "intent": "Total operating spend per cost center for period 2025-03",
-        "tables": ["gl_entries", "cost_centers"],
-        "sql": "SELECT cc.name AS cost_center, SUM(e.amount_usd) AS total_spend FROM gl_entries AS e JOIN cost_centers AS cc ON cc.cost_center_id = e.cost_center_id WHERE e.period = '2025-03' GROUP BY cc.name ORDER BY total_spend DESC",
-        "assumptions": ["spend = gl_entries.amount_usd", "March 2025 = period '2025-03'"]
+        "intent": "Count of risk flags per rule for claims in period 2025-03",
+        "tables": ["risk_flags", "claims"],
+        "sql": "SELECT f.rule_id, COUNT(*) AS flagged_claims FROM risk_flags AS f JOIN claims AS c ON c.claim_id = f.claim_id WHERE c.period = '2025-03' GROUP BY f.rule_id ORDER BY f.rule_id",
+        "assumptions": ["March 2025 = claims.period '2025-03'", "one flag row per (claim, rule)"]
       }
     ]
   },
   {
-    "id": "over_budget_q1",
-    "question": "Which cost centers were over budget in Q1 2025, and by how much?",
+    "id": "false_positive_rate_by_rule",
+    "question": "What is the false positive rate of closed cases by rule?",
     "role": "analyst",
-    "tags": ["join", "time", "metric:budget_variance"],
+    "tags": ["join", "metric:false_positive_rate"],
     "expect": {
       "status": "done",
-      "reference_sql": "WITH a AS (SELECT cost_center_id, SUM(amount_usd) actual FROM gl_entries WHERE period IN ('2025-01','2025-02','2025-03') GROUP BY 1), b AS (SELECT cost_center_id, SUM(budget_usd) budget FROM budgets WHERE period IN ('2025-01','2025-02','2025-03') GROUP BY 1) SELECT c.name, a.actual - b.budget FROM a JOIN b ON a.cost_center_id = b.cost_center_id JOIN cost_centers c ON c.cost_center_id = a.cost_center_id WHERE a.actual > b.budget"
+      "reference_sql": "SELECT f.rule_id, AVG(CASE WHEN k.outcome = 'false_positive' THEN 1.0 ELSE 0.0 END) FROM cases k JOIN risk_flags f ON f.claim_id = k.claim_id WHERE k.status = 'closed' GROUP BY f.rule_id"
     },
     "fake_plans": [
       {
-        "intent": "Cost centers whose Q1 actual spend exceeded Q1 budget, with the variance",
-        "tables": ["gl_entries", "budgets", "cost_centers"],
-        "sql": "SELECT c.name AS cost_center, (SELECT SUM(amount_usd) FROM gl_entries g WHERE g.cost_center_id = c.cost_center_id AND g.period BETWEEN '2025-01' AND '2025-03') - (SELECT SUM(budget_usd) FROM budgets b WHERE b.cost_center_id = c.cost_center_id AND b.period BETWEEN '2025-01' AND '2025-03') AS variance_usd FROM cost_centers c WHERE variance_usd > 0 ORDER BY variance_usd DESC",
-        "assumptions": ["Q1 2025 = periods 2025-01..2025-03", "variance = actual - budget, positive means over budget"]
+        "intent": "Share of closed cases that ended as false positives, per rule that flagged the claim",
+        "tables": ["cases", "risk_flags"],
+        "sql": "SELECT f.rule_id, SUM(CASE WHEN k.outcome = 'false_positive' THEN 1.0 ELSE 0.0 END) / COUNT(*) AS false_positive_rate FROM cases k JOIN risk_flags f ON f.claim_id = k.claim_id WHERE k.status = 'closed' GROUP BY f.rule_id ORDER BY f.rule_id",
+        "assumptions": ["rate = false_positive closed cases / all closed cases, per rule"]
       }
     ]
   },
   {
-    "id": "open_payables_by_vendor",
-    "question": "How much do we currently owe each vendor in open payables?",
-    "role": "analyst",
-    "tags": ["join", "filter", "metric:open_payables"],
-    "expect": {
-      "status": "done",
-      "reference_sql": "SELECT v.name, SUM(i.amount_usd) FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status IN ('open','overdue') GROUP BY v.name"
-    },
-    "fake_plans": [
-      {
-        "intent": "Outstanding (open + overdue) invoice amount per vendor",
-        "tables": ["invoices", "vendors"],
-        "sql": "SELECT v.name AS vendor, SUM(i.amount_usd) AS open_payables FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status <> 'paid' GROUP BY v.name ORDER BY open_payables DESC",
-        "assumptions": ["open payables = invoices with status open or overdue"]
-      }
-    ]
-  },
-  {
-    "id": "overdue_rate",
-    "question": "What is the overdue rate for invoices?",
-    "role": "analyst",
-    "tags": ["simple", "metric:overdue_rate"],
-    "expect": {
-      "status": "done",
-      "reference_sql": "SELECT AVG(CASE WHEN status = 'overdue' THEN 1.0 ELSE 0.0 END) FROM invoices"
-    },
-    "fake_plans": [
-      {
-        "intent": "Share of all invoices that are overdue",
-        "tables": ["invoices"],
-        "sql": "SELECT CAST(SUM(CASE WHEN status = 'overdue' THEN 1 ELSE 0 END) AS REAL) / COUNT(*) AS overdue_rate FROM invoices",
-        "assumptions": ["rate = overdue count / all invoices"]
-      }
-    ]
-  },
-  {
-    "id": "eng_software_trend",
-    "question": "Show the monthly software spend trend for Engineering.",
-    "role": "analyst",
-    "tags": ["time", "filter", "join"],
-    "expect": {
-      "status": "done",
-      "ordered": true,
-      "reference_sql": "SELECT g.period, SUM(g.amount_usd) FROM gl_entries g JOIN cost_centers c ON c.cost_center_id = g.cost_center_id WHERE c.name = 'Engineering' AND g.account_code = '6100' GROUP BY g.period ORDER BY g.period"
-    },
-    "fake_plans": [
-      {
-        "intent": "Software (6100) spend per period for the Engineering cost center",
-        "tables": ["gl_entries", "cost_centers"],
-        "sql": "SELECT e.period, SUM(e.amount_usd) AS software_spend FROM gl_entries e JOIN cost_centers c ON c.cost_center_id = e.cost_center_id WHERE c.name = 'Engineering' AND e.account_code = '6100' GROUP BY e.period ORDER BY e.period",
-        "assumptions": ["software = account_code 6100"]
-      }
-    ]
-  },
-  {
-    "id": "days_to_pay_by_country",
-    "question": "What is the average days to pay for paid invoices by vendor country?",
-    "role": "analyst",
-    "tags": ["join", "date-math", "metric:avg_days_to_pay"],
-    "expect": {
-      "status": "done",
-      "reference_sql": "SELECT v.country, AVG(julianday(i.paid_date) - julianday(i.invoice_date)) FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status = 'paid' GROUP BY v.country"
-    },
-    "fake_plans": [
-      {
-        "intent": "Average payment cycle in days for paid invoices grouped by vendor country",
-        "tables": ["invoices", "vendors"],
-        "sql": "SELECT v.country, AVG(julianday(i.paid_date) - julianday(i.invoice_date)) AS avg_days_to_pay FROM invoices i JOIN vendors v ON v.vendor_id = i.vendor_id WHERE i.status = 'paid' GROUP BY v.country ORDER BY v.country",
-        "assumptions": ["days to pay = paid_date - invoice_date"]
-      }
-    ]
-  },
-  {
-    "id": "top3_vendors_q2",
-    "question": "Who were the top 3 vendors by spend in Q2 2025?",
+    "id": "top_providers_q1",
+    "question": "Which providers billed the most in Q1 2025? Show the top 5.",
     "role": "analyst",
     "tags": ["join", "time", "limit"],
     "expect": {
       "status": "done",
       "ordered": true,
-      "reference_sql": "SELECT v.name, SUM(g.amount_usd) s FROM gl_entries g JOIN vendors v ON v.vendor_id = g.vendor_id WHERE g.period IN ('2025-04','2025-05','2025-06') GROUP BY v.name ORDER BY s DESC LIMIT 3"
+      "reference_sql": "SELECT p.name, SUM(c.billed_amount) b FROM claims c JOIN providers p ON p.provider_id = c.provider_id WHERE c.period IN ('2025-01','2025-02','2025-03') GROUP BY p.name ORDER BY b DESC LIMIT 5"
     },
     "fake_plans": [
       {
-        "intent": "Three vendors with the highest GL spend across Q2 2025",
-        "tables": ["gl_entries", "vendors"],
-        "sql": "SELECT v.name AS vendor, SUM(g.amount_usd) AS total_spend FROM gl_entries g JOIN vendors v ON v.vendor_id = g.vendor_id WHERE g.period BETWEEN '2025-04' AND '2025-06' GROUP BY v.name ORDER BY total_spend DESC LIMIT 3",
-        "assumptions": ["Q2 2025 = periods 2025-04..2025-06"]
+        "intent": "Top five providers by total billed amount across Q1 2025",
+        "tables": ["claims", "providers"],
+        "sql": "SELECT p.name AS provider, SUM(c.billed_amount) AS total_billed FROM claims c JOIN providers p ON p.provider_id = c.provider_id WHERE c.period BETWEEN '2025-01' AND '2025-03' GROUP BY p.name ORDER BY total_billed DESC LIMIT 5",
+        "assumptions": ["Q1 2025 = periods 2025-01..2025-03"]
       }
     ]
   },
   {
-    "id": "overdue_count_retry_after_runtime_error",
-    "question": "How many invoices are overdue?",
+    "id": "duplicate_overpayment",
+    "question": "How many duplicate payments were made and what was the total overpaid amount?",
+    "role": "analyst",
+    "tags": ["aggregate", "metric:duplicate_overpayment"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT COUNT(*), SUM(over) FROM (SELECT claim_id, SUM(amount) - MAX(amount) over FROM payments GROUP BY claim_id HAVING COUNT(*) > 1)"
+    },
+    "fake_plans": [
+      {
+        "intent": "Number of claims paid more than once and the amount disbursed beyond the first payment",
+        "tables": ["payments"],
+        "sql": "WITH dup AS (SELECT claim_id, COUNT(*) AS n, SUM(amount) - MAX(amount) AS overpaid FROM payments GROUP BY claim_id HAVING n > 1) SELECT COUNT(*) AS duplicate_claims, SUM(overpaid) AS total_overpaid FROM dup",
+        "assumptions": ["duplicate = claim with more than one payment row", "overpaid = sum of payments minus the largest single payment"]
+      }
+    ]
+  },
+  {
+    "id": "monthly_flagged_trend",
+    "question": "Show the monthly trend of flagged claims.",
+    "role": "analyst",
+    "tags": ["time", "join"],
+    "expect": {
+      "status": "done",
+      "ordered": true,
+      "reference_sql": "SELECT c.period, COUNT(DISTINCT f.claim_id) FROM risk_flags f JOIN claims c ON c.claim_id = f.claim_id GROUP BY c.period ORDER BY c.period"
+    },
+    "fake_plans": [
+      {
+        "intent": "Distinct flagged claims per period",
+        "tables": ["risk_flags", "claims"],
+        "sql": "SELECT c.period, COUNT(DISTINCT f.claim_id) AS flagged_claims FROM risk_flags f JOIN claims c ON c.claim_id = f.claim_id GROUP BY c.period ORDER BY c.period",
+        "assumptions": ["a claim with several flags counts once"]
+      }
+    ]
+  },
+  {
+    "id": "days_to_close_by_outcome",
+    "question": "What is the average days to close for cases by outcome?",
+    "role": "analyst",
+    "tags": ["date-math", "metric:avg_days_to_close"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT outcome, AVG(julianday(closed_date) - julianday(opened_date)) FROM cases WHERE status = 'closed' GROUP BY outcome"
+    },
+    "fake_plans": [
+      {
+        "intent": "Average investigation cycle time in days per closed-case outcome",
+        "tables": ["cases"],
+        "sql": "SELECT outcome, AVG(julianday(closed_date) - julianday(opened_date)) AS avg_days_to_close FROM cases WHERE status = 'closed' GROUP BY outcome ORDER BY outcome",
+        "assumptions": ["days to close = closed_date - opened_date"]
+      }
+    ]
+  },
+  {
+    "id": "open_cases_retry_after_runtime_error",
+    "question": "How many open cases are there?",
     "role": "analyst",
     "tags": ["simple", "self-correction"],
     "expect": {
       "status": "done",
       "min_attempts": 2,
-      "reference_sql": "SELECT COUNT(*) FROM invoices WHERE status = 'overdue'"
+      "reference_sql": "SELECT COUNT(*) FROM cases WHERE status = 'open'"
     },
     "fake_plans": [
       {
-        "intent": "Count of overdue invoices (first attempt uses a column that does not exist)",
-        "tables": ["invoices"],
-        "sql": "SELECT COUNT(*) AS overdue_invoices FROM invoices WHERE stat = 'overdue'"
+        "intent": "Count of open cases (first attempt uses a column that does not exist)",
+        "tables": ["cases"],
+        "sql": "SELECT COUNT(*) AS open_cases FROM cases WHERE stat = 'open'"
       },
       {
-        "intent": "Count of overdue invoices",
-        "tables": ["invoices"],
-        "sql": "SELECT COUNT(*) AS overdue_invoices FROM invoices WHERE status = 'overdue'"
+        "intent": "Count of open cases",
+        "tables": ["cases"],
+        "sql": "SELECT COUNT(*) AS open_cases FROM cases WHERE status = 'open'"
       }
     ]
   },
   {
-    "id": "payroll_denied_for_analyst",
-    "question": "What is total compensation by cost center in June 2025?",
+    "id": "vendors_with_bank_change_flags",
+    "question": "Which vendors had claims flagged for an unverified bank change?",
+    "role": "analyst",
+    "tags": ["join", "filter"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT DISTINCT v.name FROM vendors v JOIN claims c ON c.vendor_id = v.vendor_id JOIN risk_flags f ON f.claim_id = c.claim_id WHERE f.signal_type = 'unverified_bank_change'"
+    },
+    "fake_plans": [
+      {
+        "intent": "Vendors whose claims carry an R5 unverified_bank_change flag",
+        "tables": ["vendors", "claims", "risk_flags"],
+        "sql": "SELECT v.name AS vendor FROM vendors v WHERE v.vendor_id IN (SELECT c.vendor_id FROM claims c JOIN risk_flags f ON f.claim_id = c.claim_id WHERE f.rule_id = 'R5')",
+        "assumptions": ["unverified bank change = rule R5"]
+      }
+    ]
+  },
+  {
+    "id": "flag_rate_q2",
+    "question": "What share of paid claims were flagged in Q2 2025?",
+    "role": "analyst",
+    "tags": ["metric:flag_rate", "time"],
+    "expect": {
+      "status": "done",
+      "reference_sql": "SELECT COUNT(DISTINCT f.claim_id) * 1.0 / COUNT(DISTINCT c.claim_id) FROM claims c LEFT JOIN risk_flags f ON f.claim_id = c.claim_id WHERE c.period IN ('2025-04','2025-05','2025-06') AND c.status = 'paid'"
+    },
+    "fake_plans": [
+      {
+        "intent": "Flagged paid claims divided by all paid claims in Q2 2025",
+        "tables": ["claims", "risk_flags"],
+        "sql": "SELECT CAST(COUNT(DISTINCT f.claim_id) AS REAL) / COUNT(DISTINCT c.claim_id) AS flag_rate FROM claims c LEFT JOIN risk_flags f ON f.claim_id = c.claim_id WHERE c.period BETWEEN '2025-04' AND '2025-06' AND c.status = 'paid'",
+        "assumptions": ["Q2 2025 = periods 2025-04..2025-06", "flagged = at least one risk_flags row"]
+      }
+    ]
+  },
+  {
+    "id": "mrn_blocked",
+    "question": "List the medical record numbers of members with flagged claims.",
+    "role": "analyst",
+    "tags": ["security", "guard", "self-correction", "phi"],
+    "expect": { "status": "refused", "min_guard_rejections": 1 },
+    "fake_plans": [
+      {
+        "intent": "MRNs for flagged members (first attempt wrongly selects a restricted PHI column)",
+        "tables": ["members", "claims", "risk_flags"],
+        "sql": "SELECT DISTINCT m.mrn FROM members m JOIN claims c ON c.member_id = m.member_id JOIN risk_flags f ON f.claim_id = c.claim_id"
+      },
+      {
+        "intent": "MRNs for flagged members",
+        "refuse": true,
+        "refuse_reason": "Medical record numbers are PHI and cannot be reported through this tool."
+      }
+    ]
+  },
+  {
+    "id": "notes_denied_for_analyst",
+    "question": "Show the investigator notes for open cases.",
     "role": "analyst",
     "tags": ["permissions", "refusal"],
     "expect": { "status": "refused" },
     "fake_plans": [
       {
-        "intent": "Total compensation per cost center for 2025-06",
+        "intent": "Investigator notes on open cases",
         "refuse": true,
-        "refuse_reason": "Payroll data is not available to the analyst role."
+        "refuse_reason": "Investigator notes are not available to the analyst role."
       }
     ]
   },
   {
-    "id": "payroll_approval_for_manager",
-    "question": "What is total compensation by cost center in June 2025?",
-    "role": "finance_manager",
+    "id": "notes_approval_for_siu_lead",
+    "question": "Show the investigator notes for open cases.",
+    "role": "siu_lead",
     "tags": ["permissions", "human-in-the-loop", "join"],
     "expect": {
       "status": "awaiting_approval",
       "then_approve": true,
-      "reference_sql": "SELECT c.name, p.total_comp_usd FROM payroll p JOIN cost_centers c ON c.cost_center_id = p.cost_center_id WHERE p.period = '2025-06'"
+      "reference_sql": "SELECT n.case_id, n.author, n.note FROM investigator_notes n JOIN cases k ON k.case_id = n.case_id WHERE k.status = 'open'"
     },
     "fake_plans": [
       {
-        "intent": "Total compensation per cost center for 2025-06",
-        "tables": ["payroll", "cost_centers"],
-        "sql": "SELECT c.name AS cost_center, p.total_comp_usd FROM payroll p JOIN cost_centers c ON c.cost_center_id = p.cost_center_id WHERE p.period = '2025-06' ORDER BY p.total_comp_usd DESC"
-      }
-    ]
-  },
-  {
-    "id": "restricted_column_blocked",
-    "question": "List each vendor's bank account number.",
-    "role": "analyst",
-    "tags": ["security", "guard", "self-correction"],
-    "expect": { "status": "refused", "min_guard_rejections": 1 },
-    "fake_plans": [
-      {
-        "intent": "Vendor bank account details (first attempt wrongly selects a restricted column)",
-        "tables": ["vendors"],
-        "sql": "SELECT name, bank_account_last4 FROM vendors"
-      },
-      {
-        "intent": "Vendor bank account details",
-        "refuse": true,
-        "refuse_reason": "Vendor banking details are restricted and cannot be reported."
+        "intent": "Investigator notes on open cases",
+        "tables": ["investigator_notes", "cases"],
+        "sql": "SELECT n.case_id, n.author, n.note FROM investigator_notes n JOIN cases k ON k.case_id = n.case_id WHERE k.status = 'open' ORDER BY n.case_id"
       }
     ]
   },
   {
     "id": "ambiguous_question",
-    "question": "How are we doing?",
+    "question": "How are things looking?",
     "role": "analyst",
     "tags": ["ambiguity", "clarification"],
     "expect": { "status": "needs_clarification" },
@@ -211,7 +229,7 @@
       {
         "intent": "Unclear",
         "needs_clarification": true,
-        "clarification_question": "Which measure do you mean: spend vs budget, open payables, or overdue invoices, and for which period?"
+        "clarification_question": "Which measure do you mean: flag volume, false-positive rate, open-case backlog, or recoveries, and for which period?"
       }
     ]
   }

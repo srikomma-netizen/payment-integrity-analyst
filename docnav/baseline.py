@@ -53,16 +53,16 @@ class FlatChunkRetriever:
 
 # Expert-labelled: which sections are needed for a complete, correct answer.
 RETRIEVAL_EVALS: list[dict] = [
-    {"question": "Can a 45,000 USD software subscription renewal be paid without a purchase order?",
-     "required": ["3.1", "3.2", "2.1"]},
-    {"question": "A vendor emailed us new bank account details. What must happen before we update them?",
-     "required": ["4.3", "9"]},
-    {"question": "An invoice is 3 percent higher than the PO value. Can AP release it automatically?",
-     "required": ["5.2", "3.1"]},
-    {"question": "What is the per diem for international travel and which travel items are never reimbursed?",
+    {"question": "A claim was paid twice after a portal resubmission. Can we auto-recover, and when does an investigator need to approve?",
+     "required": ["5.2", "8.1", "2.1"]},
+    {"question": "A vendor emailed new bank details six days before a 48,000 USD invoice. What must happen before payment?",
+     "required": ["4.1", "4.2", "6"]},
+    {"question": "A provider billed 99215 at three times the peer median and has a prior confirmed case. What severity and who reviews it?",
+     "required": ["2.2", "3.1", "3.2"]},
+    {"question": "Which member fields may an analyst see, and what can be sent to the model?",
      "required": ["7.1", "7.2"]},
-    {"question": "An invoice for last month's services arrived after the close. How is it booked?",
-     "required": ["8.2", "8.1"]},
+    {"question": "Two panel component codes were billed separately on the same day. What is the disposition?",
+     "required": ["2.3", "5.3", "A"]},
 ]
 
 
