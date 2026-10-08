@@ -49,3 +49,54 @@ def test_policy_ask(client):
     body = r.json()
     assert r.status_code == 200 and "4.1" in body["sections_read"]
     assert body["answer"]["citations"]
+
+
+def test_console_and_static_assets_served(client):
+    assert "Payment Integrity Analyst" in client.get("/").text
+    assert client.get("/static/app.js").status_code == 200
+    assert client.get("/static/app.css").status_code == 200
+
+
+def test_pipeline_events_show_retry_and_guard_rejection(client):
+    retry = client.post("/ask", json={"question": "How many open cases are there?"}).json()
+    nodes = [(e["attempt"], e["node"], e["outcome"]) for e in retry["events"]]
+    assert (1, "execute", "error") in nodes and (2, "execute", "ok") in nodes
+    assert retry["pipeline"]["verify"] == "ok" and retry["execute_ms"] is not None
+
+    phi = client.post("/ask", json={"question": "List the medical record numbers of members with flagged claims."}).json()
+    assert phi["pipeline"]["guard"] == "error" and phi["pipeline"]["understand"] == "stop"
+    assert phi["pipeline"]["execute"] == "skipped"
+
+
+def test_queue_listing_and_role_enforced_decision(client):
+    q = "Show the investigator notes for open cases."
+    paused = client.post("/ask", json={"question": q, "role": "siu_lead"}).json()
+    assert paused["pipeline"]["approve"] == "pending"
+    queue = client.get("/runs", params={"status": "awaiting_approval"}).json()
+    assert paused["run_id"] in [r["run_id"] for r in queue]
+    denied = client.post(f"/runs/{paused['run_id']}/decision", json={"approved": True, "reviewer_role": "analyst"})
+    assert denied.status_code == 403
+    done = client.post(f"/runs/{paused['run_id']}/decision", json={"approved": True, "reviewer": "lead_2", "reviewer_role": "siu_lead"}).json()
+    assert done["pipeline"]["approve"] == "ok" and done["status"] == "done"
+    assert paused["run_id"] not in [r["run_id"] for r in client.get("/runs", params={"status": "awaiting_approval"}).json()]
+
+
+def test_schema_meta_outline_and_evals(client):
+    analyst = client.get("/schema", params={"role": "analyst"}).json()
+    notes = next(t for t in analyst["tables"] if t["name"] == "investigator_notes")
+    assert notes["allowed"] is False and notes["requires_approval"] is True
+    members = next(t for t in analyst["tables"] if t["name"] == "members")
+    assert {c["name"] for c in members["columns"] if c["restricted"]} == {"mrn", "dob"}
+    assert client.get("/schema", params={"role": "admin"}).status_code == 422
+
+    meta = client.get("/meta").json()
+    assert meta["offline"] is True and len(meta["examples"]) >= 10
+
+    outline = client.get("/policy/outline").json()
+    s23 = next(s for s in outline["sections"] if s["id"] == "2.3")
+    assert "5.3" in s23["cited_by"]
+    assert client.get("/policy/section/9.9").status_code == 404
+
+    ev = client.post("/evals/run").json()
+    assert ev["summary"]["passed"] == ev["summary"]["cases"]
+    assert all(r["navigator_recall"] >= r["baseline_recall"] for r in ev["retrieval"])

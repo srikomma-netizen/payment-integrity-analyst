@@ -14,6 +14,7 @@ No framework dependency means the tests exercise exactly what runs in prod.
 """
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -26,6 +27,7 @@ class RunState:
     question: str
     role: str = "analyst"
     run_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    created_at: float = field(default_factory=time.time)
     status: str = "running"            # running | awaiting_approval | done | refused | needs_clarification | failed
     next_node: str = ""
     attempts: int = 0
@@ -62,6 +64,10 @@ class CheckpointStore:
 
     def get(self, run_id: str) -> RunState | None:
         return self._runs.get(run_id)
+
+    def all(self) -> list[RunState]:
+        """Newest first."""
+        return sorted(self._runs.values(), key=lambda r: r.created_at, reverse=True)
 
 
 class Graph:

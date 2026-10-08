@@ -182,3 +182,6 @@ class AnalystAgent:
 
     def get(self, run_id: str) -> RunState | None:
         return self.store.get(run_id)
+
+    def runs(self) -> list[RunState]:
+        return self.store.all()

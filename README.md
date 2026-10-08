@@ -34,8 +34,9 @@ bank-change flags.
 | `analyst/agent.py` | The analyst graph: understand, guard, approve, execute, compose, verify, with self-correction loops |
 | `analyst/evals/` | Golden set and runner. Scores result correctness against reference SQL, groundedness, PHI blocking, refusals, permissions, retries |
 | `docnav/` | Agentic navigation of a payment-integrity policy (outline, search, read with cross-references) versus flat-chunk RAG, with a retrieval-recall A/B |
-| `api/main.py` | FastAPI service: ask, inspect run, approve or reject, policy questions |
-| `tests/` | 42 tests, all offline (including stubbed Claude adapters) |
+| `api/main.py` | FastAPI service: ask, list and inspect runs, approve or reject (SIU lead only), policy questions and outline, schema, evals, and the web console |
+| `web/` | The web console: `index.html`, `app.css`, `app.js` |
+| `tests/` | 47 tests, all offline (including stubbed Claude adapters and the console API) |
 
 ## Run it
 
@@ -56,6 +57,22 @@ same guard, same evals.
 curl -s localhost:8000/ask -H 'content-type: application/json' \
   -d '{"question":"What is the false positive rate of closed cases by rule?"}'
 ```
+
+## Web console
+
+`uvicorn api.main:app` then open http://localhost:8000/. No build step: plain
+HTML, CSS and an ES module in `web/`, served by the same FastAPI app.
+
+| Screen | What it shows |
+|---|---|
+| **Ask** | Question composer with role-aware examples; a live pipeline stepper (understand, guard, approve, execute, compose, verify) with per-attempt timeline; the answer with interpretation, assumptions and groundedness; results as an auto-chosen chart (bars, or a line for monthly periods) or a sortable table; highlighted SQL; raw trace; run history |
+| **Approvals** | The SIU-lead queue of held queries with the SQL to review; approve or reject resumes the paused run. The server rejects decisions from any other role (403) |
+| **Policy** | The policy outline with the agent's reading order numbered, the hop-by-hop reading path, cited sections, and a section reader with "refers to" and "cited by" links |
+| **Evals** | One-click golden-set run with KPI tiles, per-case results, capability roll-up, and the navigator-versus-flat-chunks retrieval chart with a table view |
+| **Schema** | The catalog exactly as the selected role sees it: locked tables, struck-through PHI columns, approval flags, and metric definitions |
+
+Light and dark themes, keyboard shortcuts (`/` to focus, Ctrl+Enter to run), and a
+compact layout below 760px.
 
 ## Roles
 
