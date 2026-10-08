@@ -19,6 +19,7 @@ const state = {
   auditFilter: "all",
   pendingAsk: null,
 };
+// localStorage can throw (private mode, blocked storage); keep the default role then
 try { state.role = localStorage.getItem("pia-role") || "analyst"; } catch (e) {}
 
 const NODES = [
@@ -44,10 +45,12 @@ const ICON = {
 };
 
 // ------------------------------------------------------------------ utils --
+// Everything from the API or the user goes through esc() before it reaches innerHTML.
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { "content-type": "application/json" }, ...opts });
+  // error bodies aren't always JSON; FastAPI's detail is a string or a validation-error list
   let body = null;
   try { body = await res.json(); } catch (e) {}
   if (!res.ok) {
@@ -70,11 +73,14 @@ function fmt(v, col = "") {
   if (v === null || v === undefined) return '<span class="muted">null</span>';
   if (!isNum(v)) return esc(v);
   const c = col.toLowerCase();
+  // rate/share columns in [0, 1] are fractions, so show them as percentages
   if ((c.includes("rate") || c.includes("share")) && v >= 0 && v <= 1) return (v * 100).toFixed(1) + "%";
   if (Number.isInteger(v)) return v.toLocaleString();
+  // the API sends no units, so money columns are guessed from the name
   const money = /(amount|billed|paid|overpaid|recovery|total|usd)/.test(c);
   return v.toLocaleString(undefined, { minimumFractionDigits: money ? 2 : 0, maximumFractionDigits: money ? 2 : 2 });
 }
+// text-only variant for SVG labels and tooltips; callers escape the result again
 const fmtPlain = (v, col) => fmt(v, col).replace(/<[^>]+>/g, "");
 
 function timeAgo(ts) {
@@ -102,8 +108,10 @@ const roleLabel = (r) => (r === "siu_lead" ? "SIU lead" : "Analyst");
 // --------------------------------------------------------------- tooltips --
 function bindTooltips(root) {
   root.querySelectorAll("[data-tip]").forEach((el) => {
+    // data-tip is HTML built from esc()'d parts, so innerHTML is safe here
     el.addEventListener("pointerenter", () => { tooltip.innerHTML = el.dataset.tip; tooltip.hidden = false; });
     el.addEventListener("pointermove", (e) => {
+      // sit below-right of the pointer, flipping to the other side when it would run off the viewport
       const pad = 14, w = tooltip.offsetWidth, h = tooltip.offsetHeight;
       let x = e.clientX + pad, y = e.clientY + pad;
       if (x + w > innerWidth - 8) x = e.clientX - w - pad;
@@ -118,9 +126,12 @@ function bindTooltips(root) {
 const KW = /\b(SELECT|FROM|WHERE|JOIN|LEFT|RIGHT|INNER|OUTER|ON|GROUP|BY|ORDER|HAVING|LIMIT|AS|AND|OR|NOT|IN|IS|NULL|CASE|WHEN|THEN|ELSE|END|WITH|DISTINCT|BETWEEN|DESC|ASC|UNION|ALL|LIKE|USING)\b/gi;
 const FN = /\b(COUNT|SUM|AVG|MIN|MAX|CAST|ROUND|julianday|COALESCE|REAL)\b/gi;
 function highlightSQL(sql) {
+  // Split on single-quoted literals ('' is an escaped quote). The capture group keeps the
+  // literals in the array at odd indexes, so string contents never get keyword-highlighted.
   const parts = String(sql || "").split(/('(?:[^']|'')*')/g);
   return parts.map((p, i) => {
     if (i % 2) return `<span class="s">${esc(p)}</span>`;
+    // escape first, then wrap tokens; the inserted markup has no digits or SQL words for later passes to hit
     return esc(p)
       .replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="n">$1</span>')
       .replace(FN, (m) => `<span class="f">${m}</span>`)
@@ -128,6 +139,8 @@ function highlightSQL(sql) {
   }).join("");
 }
 function prettySQL(sql) {
+  // display only: newline before major clauses. Case-sensitive on purpose, since the guard
+  // returns upper-case keywords. SELECT DISTINCT is left on one line.
   return String(sql || "").replace(/\s+(FROM|WHERE|JOIN|LEFT JOIN|GROUP BY|ORDER BY|HAVING|LIMIT|SELECT(?= (?!DISTINCT)))\b/g, "\n$1")
     .replace(/^\n/, "");
 }
@@ -137,25 +150,30 @@ function prettySQL(sql) {
 // Bars: <=24px thick, 4px rounded data-end, square at the baseline, 2px gap, hover tooltip.
 function barPath(x0, y, w, h, r = 4) {
   if (w <= 0) return "";
+  // clamp the radius so a short bar doesn't get corners wider than the bar itself
   r = Math.min(r, w, h / 2);
   return `M${x0},${y} H${x0 + w - r} Q${x0 + w},${y} ${x0 + w},${y + r} V${y + h - r} Q${x0 + w},${y + h} ${x0 + w - r},${y + h} H${x0} Z`;
 }
 
 function niceMax(v) {
   if (v <= 0) return 1;
+  // round up to 1 / 2 / 2.5 / 5 / 10 x a power of ten so the quarter ticks land on readable values
   const p = Math.pow(10, Math.floor(Math.log10(v)));
   const n = v / p;
   return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
 }
 
 function hBarChart({ labels, values, colLabel, valueCol, width = 720, title = true }) {
+  // label gutter sized from the longest label (~7.2px per char), clamped to 70-220px
   const labelW = Math.min(220, Math.max(70, Math.max(...labels.map((l) => String(l).length)) * 7.2 + 12));
   const barH = Math.min(24, 22), gap = 10, top = 22, padR = 70;
   const h = top + labels.length * (barH + gap) + 6;
+  // the extra 0 keeps Math.max finite for an empty series; niceMax then returns 1
   const max = niceMax(Math.max(...values, 0));
   const plotW = width - labelW - padR;
   const x = (v) => labelW + (v / max) * plotW;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => t * max);
+  // value labels on every bar only when there are few; otherwise just on the largest
   const showAll = labels.length <= 8;
   const maxIdx = values.indexOf(Math.max(...values));
   let g = `<g class="grid">${ticks.map((t) => `<line x1="${x(t)}" x2="${x(t)}" y1="${top - 6}" y2="${h}"/>`).join("")}</g>`;
@@ -167,6 +185,7 @@ function hBarChart({ labels, values, colLabel, valueCol, width = 720, title = tr
     g += `<text x="${labelW - 10}" y="${y + barH / 2 + 4}" text-anchor="end">${esc(String(l).length > 30 ? String(l).slice(0, 29) + "…" : l)}</text>`;
     g += `<path class="bar" d="${barPath(labelW, y, w, barH)}"/>`;
     if (showAll || i === maxIdx) g += `<text class="val" x="${labelW + w + 6}" y="${y + barH / 2 + 4}">${esc(fmtPlain(values[i], valueCol))}</text>`;
+    // invisible full-width row so the tooltip works anywhere on the row, not just on the bar
     g += `<rect class="hit" x="0" y="${y - gap / 2}" width="${width}" height="${barH + gap}" data-tip="${esc(tip)}"/>`;
   });
   g += `<line class="axis" x1="${labelW}" x2="${labelW}" y1="${top - 6}" y2="${h}" stroke="var(--border-strong)"/>`;
@@ -177,6 +196,7 @@ function lineChart({ labels, values, colLabel, valueCol, width = 720, height = 2
   const padL = 56, padR = 24, top = 18, bottom = 28;
   const max = niceMax(Math.max(...values, 0));
   const plotW = width - padL - padR, plotH = height - top - bottom;
+  // a single point is centred rather than dividing by labels.length - 1 = 0
   const x = (i) => padL + (labels.length === 1 ? plotW / 2 : (i / (labels.length - 1)) * plotW);
   const y = (v) => top + plotH - (v / max) * plotH;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => t * max);
@@ -190,6 +210,7 @@ function lineChart({ labels, values, colLabel, valueCol, width = 720, height = 2
     g += `<circle class="marker" cx="${x(i)}" cy="${y(v)}" r="4.5"/>`;
     if (i === maxIdx || i === lastIdx) g += `<text class="val" x="${x(i)}" y="${y(v) - 10}" text-anchor="middle">${esc(fmtPlain(v, valueCol))}</text>`;
   });
+  // hover bands are one step wide and centred on each point, so the whole plot is hoverable
   const band = labels.length > 1 ? plotW / (labels.length - 1) : plotW;
   labels.forEach((l, i) => {
     const tip = `<b>${esc(l)}</b><br>${esc(valueCol)}: ${esc(fmtPlain(values[i], valueCol))}`;
@@ -201,6 +222,7 @@ function lineChart({ labels, values, colLabel, valueCol, width = 720, height = 2
 
 function bindCrosshair(root) {
   root.querySelectorAll("svg").forEach((svg) => {
+    // "#cross" repeats when a page has several line charts, so look it up per svg
     const cross = svg.querySelector("#cross");
     if (!cross) return;
     svg.querySelectorAll("[data-cross]").forEach((r) => {
@@ -212,6 +234,8 @@ function bindCrosshair(root) {
 
 function autoChart(columns, rows) {
   if (!rows.length || rows.length > 40 || columns.length < 2) return null;
+  // value = first all-numeric column after column 0; label = first column with no numbers.
+  // Anything that doesn't fit that shape falls back to the table.
   const numIdx = columns.findIndex((c, i) => i > 0 && rows.every((r) => isNum(r[i]) || r[i] === null));
   if (numIdx < 0) return null;
   const labelIdx = columns.findIndex((c, i) => i !== numIdx && rows.every((r) => !isNum(r[i])));
@@ -219,6 +243,7 @@ function autoChart(columns, rows) {
   const labels = rows.map((r) => r[labelIdx] ?? "null");
   const values = rows.map((r) => r[numIdx] ?? 0);
   const spec = { labels, values, colLabel: columns[labelIdx], valueCol: columns[numIdx] };
+  // YYYY-MM labels are periods, so draw a trend line; anything else is a bar chart
   return labels.every((l) => /^\d{4}-\d{2}$/.test(l)) && labels.length > 1 ? lineChart(spec) : hBarChart(spec);
 }
 
@@ -235,6 +260,7 @@ function bindSort(table, columns, rows) {
   table.querySelectorAll("th").forEach((th) => th.addEventListener("click", () => {
     const i = +th.dataset.col;
     asc = sortCol === i ? !asc : true; sortCol = i;
+    // plain > comparison; nulls and mixed types order loosely, which is fine for a display table
     const sorted = [...rows].sort((a, b) => (a[i] === b[i] ? 0 : (a[i] > b[i] ? 1 : -1)) * (asc ? 1 : -1));
     table.querySelector("tbody").innerHTML = sorted.map((r) => `<tr>${r.map((v, j) => `<td class="${table.querySelectorAll("th")[j].classList.contains("num") ? "num" : ""}">${fmt(v, columns[j])}</td>`).join("")}</tr>`).join("");
     table.querySelectorAll(".dir").forEach((d, j) => (d.textContent = j === i ? (asc ? "▲" : "▼") : ""));
@@ -258,6 +284,7 @@ function syncIdentity() {
 }
 document.querySelectorAll("#roleSwitch button").forEach((b) => b.addEventListener("click", () => setRole(b.dataset.role)));
 $("#themeBtn").addEventListener("click", () => {
+  // no data-theme yet means we're following the OS setting; toggle relative to that
   const cur = document.documentElement.dataset.theme
     || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   const next = cur === "dark" ? "light" : "dark";
@@ -266,6 +293,7 @@ $("#themeBtn").addEventListener("click", () => {
 });
 
 async function refreshQueue() {
+  // best-effort: this runs on a timer, so a failed poll returns [] instead of toasting
   try {
     const q = await api("/runs?status=awaiting_approval");
     const b = $("#queueBadge");
@@ -277,6 +305,7 @@ async function refreshQueue() {
 // --------------------------------------------------------------- ASK view --
 function stepper(run) {
   const subs = {};
+  // last event per node wins, so tooltips describe the final attempt
   for (const e of run.events) subs[e.node] = e;
   return `<div class="stepper" role="list" aria-label="Pipeline">${NODES.map(([key, label, hint]) => {
     const st = run.pipeline[key] || "skipped";
@@ -312,6 +341,7 @@ function runCard(run) {
     run.execute_ms != null ? `<span class="pill">${run.execute_ms} ms</span>` : "",
   ].join("");
 
+  // only an SIU lead gets decision buttons; the API rejects other roles anyway
   const approval = run.status === "awaiting_approval" ? (state.role === "siu_lead"
     ? `<div class="approval"><div class="what"><b>Approve this query?</b><div class="secondary">It reads <code>${esc(run.tables.join(", "))}</code>. Your decision is recorded in the run trace.</div></div>
         <label class="muted" for="reviewer">Reviewer</label><input id="reviewer" value="lead_2" autocomplete="off">
@@ -328,6 +358,7 @@ function runCard(run) {
   if (run.status === "done") tabs.push(["results", `Results (${run.row_count})`]);
   if (run.sql) tabs.push(["sql", "SQL"]);
   tabs.push(["timeline", "Timeline"], ["trace", "Raw trace"]);
+  // open on the most useful tab that exists: results, else SQL, else timeline
   const first = tabs[0][0];
 
   return `<article class="card card-pad" id="runCard">
@@ -375,6 +406,7 @@ async function decide(runId, approved, reviewer) {
     const run = await api(`/runs/${runId}/decision`, { method: "POST", body: JSON.stringify({ approved, reviewer, reviewer_role: state.role }) });
     toast(approved ? "Approved. Query executed." : "Rejected. Query not executed.");
     await refreshQueue();
+    // re-render whichever view the decision was made from
     if (location.hash.startsWith("#/approvals")) renderApprovals();
     else { state.run = run; renderAsk(); }
   } catch (e) { toast(e.message, true); }
@@ -386,6 +418,7 @@ async function ask(question) {
   const btn = $("#askBtn");
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Running';
   $("#runSlot").innerHTML = `<div class="card card-pad"><div class="skeleton" style="width:60%"></div><div class="skeleton" style="width:90%;margin-top:14px"></div><div class="skeleton" style="width:75%;margin-top:10px"></div></div>`;
+  // on success renderAsk() rebuilds the button, so only the error path has to reset it
   try {
     state.run = await api("/ask", { method: "POST", body: JSON.stringify({ question: q, role: state.role }) });
     await refreshQueue();
@@ -398,6 +431,7 @@ async function ask(question) {
 }
 
 async function renderAsk() {
+  // SIU leads see analyst examples too; analysts don't see the SIU-only ones
   const examples = (state.meta?.examples || []).filter((e) => e.role === state.role || (state.role === "siu_lead" && e.role === "analyst"));
   const runs = await api("/runs?limit=30").catch(() => []);
   view.innerHTML = `
@@ -430,6 +464,7 @@ async function renderAsk() {
     try { state.run = await api(`/runs/${b.dataset.run}`); renderAsk(); } catch (e) { toast(e.message, true); }
   }));
   if (state.run) bindRunCard($("#runCard"), state.run);
+  // set by goAsk() from the palette or the case drawer; cleared first so a re-render can't run it twice
   if (state.pendingAsk) { const q = state.pendingAsk; state.pendingAsk = null; ta.value = q; ask(q); }
   bindTooltips(view);
 }
@@ -471,6 +506,7 @@ const POLICY_EXAMPLES = [
 async function renderPolicy() {
   if (!state.outline) state.outline = await api("/policy/outline");
   const res = state.policy;
+  // section id -> 1-based read step, shown as numbers in the outline
   const order = {};
   (res?.sections_read || []).forEach((s, i) => (order[s] = i + 1));
   const outline = state.outline.sections.map((s) => `<li class="l${s.level} ${order[s.id] ? "read" : ""} ${state.activeSection === s.id ? "active" : ""}">
@@ -523,6 +559,7 @@ async function renderPolicy() {
   view.querySelectorAll("[data-pex]").forEach((b) => b.addEventListener("click", () => { ta.value = b.dataset.pex; go(b.dataset.pex); }));
   view.querySelectorAll("[data-sec]").forEach((b) => b.addEventListener("click", () => showSection(b.dataset.sec)));
   bindTooltips(view);
+  // reopen the section that was showing, without jumping the page
   if (state.activeSection) showSection(state.activeSection, false);
 }
 
@@ -547,6 +584,7 @@ function retrievalChart(rows) {
   const width = 720, labelW = 250, padR = 50, barH = 12, gapIn = 2, gapOut = 16, top = 26;
   const plotW = width - labelW - padR;
   const h = top + rows.length * (barH * 2 + gapIn + gapOut);
+  // recall is already 0..1, so no niceMax: the axis is fixed at 0-100%
   const x = (v) => labelW + v * plotW;
   let g = `<g class="grid">${[0, 0.25, 0.5, 0.75, 1].map((t) => `<line x1="${x(t)}" x2="${x(t)}" y1="${top - 6}" y2="${h}"/>`).join("")}</g>`;
   g += [0, 0.5, 1].map((t) => `<text x="${x(t)}" y="${top - 10}" text-anchor="middle">${t * 100}%</text>`).join("");
@@ -555,6 +593,7 @@ function retrievalChart(rows) {
     const q = r.question.length > 38 ? r.question.slice(0, 37) + "…" : r.question;
     g += `<text x="${labelW - 10}" y="${y + barH + 4}" text-anchor="end">${esc(q)}</text>`;
     const tip = `<b>${esc(r.question)}</b><br>Required: ${esc(r.required.join(", "))}<br>Navigator: ${Math.round(r.navigator_recall * 100)}% (${esc(r.navigator.join(", "))})<br>Flat chunks: ${Math.round(r.baseline_recall * 100)}% (${esc(r.baseline.join(", "))})`;
+    // navigator is series-1 on top, flat chunks series-2 below; keep in step with the legend order
     g += `<path class="bar" d="${barPath(labelW, y, x(r.navigator_recall) - labelW, barH, 3)}"/>`;
     g += `<path class="bar s2" d="${barPath(labelW, y + barH + gapIn, x(r.baseline_recall) - labelW, barH, 3)}"/>`;
     g += `<text class="val" x="${x(r.navigator_recall) + 5}" y="${y + barH - 2}">${Math.round(r.navigator_recall * 100)}%</text>`;
@@ -624,12 +663,14 @@ async function renderSchema() {
 // Shell: navigation toggle, command palette, counts
 // ======================================================================
 const money = (v, digits = 0) => "$" + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+// null means no data (e.g. a rule with no closed cases), which is different from 0%
 const pct = (v, d = 1) => (v == null ? "n/a" : (v * 100).toFixed(d) + "%");
 const sevBadge = (s) => `<span class="sev ${esc(s)}"><i></i>${esc(s[0].toUpperCase() + s.slice(1))}</span>`;
 const OUTCOME = {
   confirmed: ["pill-bad", "Confirmed"], false_positive: ["pill-good", "False positive"],
   closed_no_action: ["", "No action"], open: ["pill-info", "Open"],
 };
+// open cases have a NULL outcome, so status decides for those
 const outcomePill = (status, outcome) => {
   const [cls, label] = OUTCOME[status === "open" ? "open" : outcome] || ["", outcome || status];
   return `<span class="pill ${cls}">${esc(label)}</span>`;
@@ -638,6 +679,7 @@ const outcomePill = (status, outcome) => {
 function initShell() {
   $("#navToggle").addEventListener("click", () => {
     const root = document.documentElement;
+    // same breakpoint as app.css: below it the nav is an overlay, above it it collapses in place
     if (matchMedia("(max-width: 900px)").matches) {
       if (root.getAttribute("data-nav-open") === "true") root.removeAttribute("data-nav-open");
       else root.setAttribute("data-nav-open", "true");
@@ -699,6 +741,8 @@ function renderPalette(text) {
   const q = text.trim().toLowerCase();
   const items = [];
   const exampleHits = (state.meta?.examples || []).filter((e) => !q || e.question.toLowerCase().includes(q)).slice(0, q ? 6 : 4);
+  // Order: with a query, matching examples and the free-text ask come first, then pages and cases.
+  // With no query, pages lead and a few examples trail. paintPalette groups by consecutive grp.
   if (q && exampleHits.length) exampleHits.forEach((e) => items.push({ grp: "Example questions", label: e.question, kind: roleLabel(e.role), run: () => goAsk(e.question) }));
   if (q.length >= 3) items.push({ grp: "Ask the agent", label: `Ask: "${text.trim()}"`, kind: roleLabel(state.role), run: () => goAsk(text.trim()) });
   PAGES.filter(([, l]) => !q || l.toLowerCase().includes(q)).forEach(([k, l]) =>
@@ -721,6 +765,7 @@ function paintPalette() {
   }).join("") || `<li class="grp">No matches</li>`;
   $("#paletteList").querySelectorAll("[data-i]").forEach((li) => {
     li.addEventListener("click", () => paletteItems[+li.dataset.i].run());
+    // repaint only when the index changes; paintPalette rebuilds the list, so doing it on every move would thrash
     li.addEventListener("mousemove", () => { if (paletteIdx !== +li.dataset.i) { paletteIdx = +li.dataset.i; paintPalette(); } });
   });
   $("#paletteList [aria-selected='true']")?.scrollIntoView({ block: "nearest" });
@@ -728,6 +773,7 @@ function paintPalette() {
 function goAsk(q) {
   closePalette();
   state.pendingAsk = q;
+  // hashchange doesn't fire when we're already on #/ask, so render directly in that case
   if (location.hash === "#/ask") renderAsk(); else location.hash = "#/ask";
 }
 
@@ -737,12 +783,15 @@ function goAsk(q) {
 function sparkline(values, label, fmtv) {
   if (!values.length) return "";
   const w = 200, h = 34, pad = 4;
+  // scaled to min..max rather than from zero: sparklines show shape, not magnitude.
+  // A flat series would divide by zero, so span falls back to 1 and draws along the bottom.
   const max = Math.max(...values), min = Math.min(...values);
   const span = max - min || 1;
   const x = (i) => pad + (i / (values.length - 1 || 1)) * (w - pad * 2);
   const y = (v) => h - pad - ((v - min) / span) * (h - pad * 2);
   const line = values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const area = `${line} L${x(values.length - 1)},${h} L${x(0)},${h} Z`;
+  // NOTE: Jan/Jun are hard-coded to the mart's six-month window
   const tip = `<b>${esc(label)}</b><br>Jan ${esc(fmtv(values[0]))} → Jun ${esc(fmtv(values[values.length - 1]))}<br>peak ${esc(fmtv(max))}`;
   return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" data-tip="${esc(tip)}" role="img" aria-label="${esc(label)} trend"><path class="a" d="${area}"/><path class="l" d="${line}" vector-effect="non-scaling-stroke"/></svg>`;
 }
@@ -758,6 +807,7 @@ async function renderOverview() {
     ["False-positive rate", pct(k.false_positive_rate), `of ${k.closed_cases} closed cases`, ""],
     ["Recovered", money(k.recovered), `${k.duplicate_claims} duplicate payments · ${money(k.overpaid)} overpaid`, ""],
   ];
+  // meters are scaled to the worst rule; the 0.01 floor avoids 0/0 when every rate is 0 or null
   const fpMax = Math.max(...d.by_rule.map((r) => r.false_positive_rate || 0), 0.01);
   const queueHtml = d.queue.length
     ? d.queue.slice(0, 4).map((r) => `<div class="qitem"><span class="pill pill-warn">${ICON.pending}</span><div><div class="t">${esc(r.question)}</div><div class="muted" style="font-size:12px">${esc(r.tables.join(", "))} · ${timeAgo(r.created_at)}</div></div></div>`).join("")
@@ -804,16 +854,21 @@ function filteredCases() {
     (f.investigator === "all" || c.investigator === f.investigator) &&
     (!q || [c.case_id, c.claim_id, c.counterparty, c.procedure_code, c.procedure_desc, c.member_id].some((v) => String(v || "").toLowerCase().includes(q))));
   const { key, asc } = state.caseSort;
+  // severity sorts by rank with max_score as the tiebreak (scores are 0..1, so rank always dominates);
+  // array columns like rules sort by their joined text
   const val = (c) => (key === "severity" ? SEV_ORDER[c.severity] * 1000 + (c.max_score || 0) : Array.isArray(c[key]) ? c[key].join(",") : c[key]);
   return [...rows].sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : 0) * (asc ? 1 : -1));
 }
 
 function downloadCsv(filename, head, rows) {
+  // quote every cell and double embedded quotes (RFC 4180), so commas and quotes in questions/details are safe;
+  // arrays such as rules become space-separated
   const cell = (v) => `"${String(Array.isArray(v) ? v.join(" ") : v ?? "").replaceAll('"', '""')}"`;
   const csv = [head.join(",")].concat(rows.map((r) => head.map((h) => cell(r[h])).join(","))).join("\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   a.download = filename; a.click();
+  // revoke a moment later; revoking straight after click() can cancel the download in some browsers
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
@@ -858,6 +913,7 @@ async function renderCases() {
       : `<div class="empty">${ICON.info}<div>No cases match these filters.</div></div>`;
     $("#caseTable").querySelectorAll("[data-sort]").forEach((th) => th.addEventListener("click", () => {
       const k2 = th.dataset.sort;
+      // same column flips direction; a new column starts ascending, except severity which starts high-first
       state.caseSort = { key: k2, asc: state.caseSort.key === k2 ? !state.caseSort.asc : k2 !== "severity" };
       paint();
     }));
@@ -879,6 +935,7 @@ async function renderCases() {
 
 let drawerReturnFocus = null;
 async function openCase(caseId) {
+  // remember what opened the drawer so closeDrawer() can hand focus back to it
   drawerReturnFocus = document.activeElement;
   const dr = $("#drawer");
   dr.innerHTML = `<div class="drawer-head"><div class="skeleton" style="width:50%"></div></div><div class="drawer-body"><div class="skeleton"></div><div class="skeleton" style="width:80%"></div></div>`;
@@ -927,6 +984,7 @@ async function openCase(caseId) {
     dr.querySelectorAll("[data-q]").forEach((b) => b.addEventListener("click", () => { closeDrawer(); goAsk(b.dataset.q); }));
     $("#toPolicy").addEventListener("click", closeDrawer);
     bindTooltips(dr);
+    // the drawer has tabindex=-1, so it can take focus for keyboard and screen-reader users
     dr.focus();
   } catch (e) { closeDrawer(); toast(e.message, true); }
 }
@@ -934,6 +992,7 @@ function closeDrawer() {
   const dr = $("#drawer");
   if (!dr.classList.contains("open")) return;
   dr.classList.remove("open"); dr.setAttribute("aria-hidden", "true"); $("#scrim").hidden = true;
+  // the opener may have been re-rendered away while the drawer was open (e.g. the table repainted)
   if (drawerReturnFocus && document.contains(drawerReturnFocus)) drawerReturnFocus.focus();
 }
 
@@ -994,6 +1053,7 @@ const CRUMBS = { overview: ["Operations", "Overview"], cases: ["Operations", "Ca
   ask: ["Agent", "Ask the data"], policy: ["Agent", "Policy navigator"], evals: ["Governance", "Evaluation"],
   audit: ["Governance", "Audit trail"], schema: ["Governance", "Data catalog"] };
 async function route() {
+  // routes look like #/cases; an unknown or missing name falls back to the overview
   const name = (location.hash.match(/^#\/(\w+)/) || [])[1] || "overview";
   const fn = VIEWS[name] || renderOverview;
   const [grp, page] = CRUMBS[name] || CRUMBS.overview;
@@ -1001,10 +1061,13 @@ async function route() {
   document.title = `${page} · Payment Integrity Console`;
   document.querySelectorAll(".side-nav a").forEach((a) => (a.dataset.view === name ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
   document.documentElement.removeAttribute("data-nav-open");
+  // a tooltip left open by the previous view would otherwise float over the new one
   tooltip.hidden = true;
   try { await fn(); } catch (e) { view.innerHTML = `<div class="card"><div class="empty">${ICON.error}<div>${esc(e.message)}</div></div></div>`; }
 }
+// focus the view on navigation so screen readers pick up the new page
 addEventListener("hashchange", () => { route(); view.focus({ preventScroll: true }); });
+// "/" jumps to the question box, unless the user is already typing in a field
 addEventListener("keydown", (e) => {
   if (e.key === "/" && !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName)) {
     const t = $("#q") || $("#pq"); if (t) { e.preventDefault(); t.focus(); }
@@ -1023,5 +1086,6 @@ addEventListener("keydown", (e) => {
   await refreshQueue();
   refreshOpenCount();
   route();
+  // the API has no push channel, so poll the approval badge
   setInterval(refreshQueue, 15000);
 })();

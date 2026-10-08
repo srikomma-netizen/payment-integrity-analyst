@@ -1,14 +1,7 @@
-"""LLM boundary for the analyst agent.
+"""LLM boundary for the analyst agent: plan() writes SQL, answer() narrates results.
 
-Two implementations behind one interface:
-
-  * AnthropicAnalystLLM  - Claude via the official SDK, structured outputs
-                           validated into Pydantic models.
-  * FakeAnalystLLM       - deterministic playbook used by tests, evals, and
-                           offline demos. Same interface, zero network.
-
-Keeping the interface tiny (plan + answer) is what makes the rest of the
-pipeline testable without an API key.
+AnthropicAnalystLLM calls the API; FakeAnalystLLM is a scripted stand-in for
+tests, evals and offline runs.
 """
 from __future__ import annotations
 
@@ -41,11 +34,13 @@ class LLMRefusal(Exception):
     """Raised when the model declines (stop_reason == 'refusal')."""
 
 
+# Kept to two methods on purpose: anything wider makes the fake harder to keep honest.
 class AnalystLLM(Protocol):
     def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan: ...
     def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft: ...
 
 
+# The rendered catalog slice is appended directly after "CATALOG:", so keep that line last.
 PLAN_SYSTEM = """You are a careful payment-integrity data analyst that writes SQL for a healthcare claims and investigations mart.
 
 Rules:
@@ -62,6 +57,7 @@ Rules:
 CATALOG:
 """
 
+# "Don't compute new numbers" is what lets agent.is_grounded check the answer mechanically.
 ANSWER_SYSTEM = """You write the final answer for a payment-integrity analyst.
 Use ONLY the numbers in the result rows you are given. Do not compute new numbers that are not present
 (you may restate a number with rounding or commas). If the result is empty, say so plainly.
@@ -76,6 +72,7 @@ class AnthropicAnalystLLM:
         self.model = model
 
     def _parse(self, system: str, user: str, schema: type[BaseModel]):
+        # structured output: the SDK validates the reply into `schema`, so no JSON scraping here
         response = self.client.messages.parse(
             model=self.model,
             max_tokens=4000,
@@ -83,6 +80,7 @@ class AnthropicAnalystLLM:
             messages=[{"role": "user", "content": user}],
             output_format=schema,
         )
+        # a refusal has no parsed_output; surface it as its own exception so the agent fails cleanly
         if response.stop_reason == "refusal":
             detail = getattr(response, "stop_details", None)
             raise LLMRefusal(getattr(detail, "explanation", "model declined the request"))
@@ -90,6 +88,7 @@ class AnthropicAnalystLLM:
 
     def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan:
         user = f"Role of the requesting user: {role}\n\nQuestion: {question}"
+        # feedback is the guard's violation list or a SQLite error from the previous attempt
         if feedback:
             user += (
                 "\n\nYour previous SQL was rejected by the validation layer. Fix it.\n"
@@ -98,7 +97,7 @@ class AnthropicAnalystLLM:
         return self._parse(PLAN_SYSTEM + schema_text, user, QueryPlan)
 
     def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft:
-        preview = rows[:50]
+        preview = rows[:50]  # keeps the prompt bounded; the true row count is still stated
         user = (
             f"Question: {question}\n\nSQL that was executed:\n{sql}\n\n"
             f"Columns: {columns}\nRows ({len(rows)} total, showing {len(preview)}):\n{preview}"
@@ -107,14 +106,16 @@ class AnthropicAnalystLLM:
 
 
 class FakeAnalystLLM:
-    """Deterministic stand-in. `playbook` maps a normalized question (optionally
-    prefixed "role::") to a QueryPlan, or a list of plans to simulate
-    retry-after-feedback."""
+    """Deterministic stand-in driven by a playbook.
+
+    Keys are questions, optionally prefixed "role::". A list value plays one
+    plan per attempt, which is how tests script retry-after-feedback.
+    """
 
     def __init__(self, playbook: dict[str, QueryPlan | list[QueryPlan]] | None = None):
         self.playbook = {self._norm_key(k): v for k, v in (playbook or {}).items()}
         self._attempts: dict[str, int] = {}
-        self.calls: list[tuple[str, str | None]] = []
+        self.calls: list[tuple[str, str | None]] = []  # (question, feedback) log for test assertions
 
     @classmethod
     def _norm_key(cls, key: str) -> str:
@@ -125,6 +126,7 @@ class FakeAnalystLLM:
 
     @staticmethod
     def _norm(q: str) -> str:
+        # case, trailing "?" and extra whitespace shouldn't make a playbook miss
         return " ".join(q.lower().strip().rstrip("?").split())
 
     def plan(self, question: str, schema_text: str, role: str, feedback: str | None = None) -> QueryPlan:
@@ -148,10 +150,11 @@ class FakeAnalystLLM:
                 self._attempts[key] = 0
             i = self._attempts.get(key, 0)
             self._attempts[key] = i + 1
-            return entry[min(i, len(entry) - 1)]
+            return entry[min(i, len(entry) - 1)]  # past the end, keep replaying the last plan
         return entry
 
     def answer(self, question: str, sql: str, columns: list[str], rows: list[list]) -> AnswerDraft:
+        # echoes cell values verbatim (first 10 rows) instead of paraphrasing, so verify has little to catch
         if not rows:
             return AnswerDraft(answer="The query returned no rows for that question.")
         if len(rows) == 1 and len(columns) == 1:
@@ -162,6 +165,7 @@ class FakeAnalystLLM:
 
 
 def make_llm(provider: str | None = None, playbook=None) -> AnalystLLM:
+    # "auto" uses the real API only when a key is set, so a fresh checkout runs offline
     provider = (provider or os.environ.get("LLM_PROVIDER", "auto")).lower()
     if provider == "fake":
         return FakeAnalystLLM(playbook)

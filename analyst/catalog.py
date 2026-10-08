@@ -1,11 +1,6 @@
-"""Semantic layer: table/column documentation, metric definitions, and
-schema retrieval.
+"""Semantic layer: table and column docs, metric definitions, schema retrieval.
 
-The LLM never sees the raw database. It sees a curated catalog with
-business definitions, and only the slice of it that is relevant to the
-question. Access control lives here (table-level and column-level) and is
-enforced deterministically by `guard.py`, not by the prompt. PHI columns
-are marked restricted and are never rendered into the prompt at all.
+Access rules are declared here but enforced in guard.py.
 """
 from __future__ import annotations
 
@@ -39,6 +34,8 @@ class Metric:
     keywords: tuple[str, ...]
 
 
+# The model only ever sees text rendered from these entries, never the live schema.
+# Descriptions double as prompt instructions, so keep them short and literal.
 TABLES: dict[str, Table] = {
     "members": Table(
         "members",
@@ -147,11 +144,14 @@ TABLES: dict[str, Table] = {
             Column("note", "TEXT", "Free text"),
         ),
         ("note", "notes", "narrative", "comments", "what did the investigator say"),
+        # analysts still get this table retrieved, but render_schema marks it unavailable
         allowed_roles=("siu_lead",),
         requires_approval=True,
     ),
 }
 
+# Metric definitions pin down semantics the model tends to get wrong on its own,
+# e.g. dividing by all cases instead of closed ones for FP rate.
 METRICS: list[Metric] = [
     Metric("flag_rate", "Share of claims in scope that have at least one risk flag.",
            "COUNT(DISTINCT risk_flags.claim_id) * 1.0 / COUNT(DISTINCT claims.claim_id) with a LEFT JOIN from claims to risk_flags",
@@ -169,6 +169,8 @@ METRICS: list[Metric] = [
            "SUM(recovery_amount) WHERE outcome='confirmed'", ("recovery", "recovered", "recoveries")),
 ]
 
+# Flat set of names: the guard matches columns by bare name, which only works
+# while no restricted column name is reused by a non-restricted column elsewhere.
 RESTRICTED_COLUMNS: frozenset[str] = frozenset(
     c.name for t in TABLES.values() for c in t.columns if c.restricted
 )
@@ -181,52 +183,54 @@ def _tokens(text: str) -> set[str]:
 
 
 def select_relevant(question: str, *, max_tables: int = 4) -> list[Table]:
-    """Cheap lexical retrieval of candidate tables.
-
-    In production this is an embedding search over the catalog; for an
-    eight-table mart a keyword overlap is honest and debuggable. `claims`
-    is the hub, so it is added whenever a fact table matches."""
+    """Pick candidate tables for a question by keyword overlap."""
+    # TODO: swap for an embedding search once the catalog grows past a few dozen tables;
+    # at eight tables keyword overlap is easy to debug and good enough.
     q = question.lower()
     q_tokens = _tokens(q)
     scored: list[tuple[float, Table]] = []
     for t in TABLES.values():
         score = 0.0
         for kw in t.keywords:
+            # phrases are substring-matched and weigh double; single words must match a whole token
             if " " in kw and kw in q:
                 score += 2.0
             elif kw in q_tokens:
                 score += 1.0
         scored.append((score, t))
-    scored.sort(key=lambda s: -s[0])
+    scored.sort(key=lambda s: -s[0])  # stable sort, so ties keep TABLES order
     chosen = [t for s, t in scored if s > 0][:max_tables]
     names = {t.name for t in chosen}
+    # claims is the hub every fact table joins through, so pull it in (may exceed max_tables)
     if names & {"payments", "risk_flags", "cases", "investigator_notes"} and "claims" not in names:
         chosen.append(TABLES["claims"])
+    # dimension tables only come along when the question names them and claims is present to join to
     if "claims" in {t.name for t in chosen}:
         for dim, hint in (("providers", "provider"), ("vendors", "vendor")):
             if dim not in names and hint in q:
                 chosen.append(TABLES[dim])
+    # nothing matched: claims + flags covers most vague questions
     return chosen or [TABLES["claims"], TABLES["risk_flags"]]
 
 
 def relevant_metrics(question: str) -> list[Metric]:
+    # plain substring match, so "duplicate" also fires on "duplicated"
     q = question.lower()
     return [m for m in METRICS if any(k in q for k in m.keywords)]
 
 
 def render_schema(tables: list[Table], metrics: list[Metric], role: str) -> str:
-    """Prompt-ready schema text. Restricted columns are omitted entirely so
-    the model cannot even name them; tables the role cannot see are listed
-    as unavailable so the model refuses instead of guessing."""
+    """Render the slice as prompt text for the given role."""
     out: list[str] = ["SQLite dialect. Periods are 'YYYY-MM' strings. Dates are ISO 'YYYY-MM-DD'.", ""]
     for t in tables:
+        # list the table as unavailable rather than hiding it, so the model refuses instead of guessing
         if role not in t.allowed_roles:
             out.append(f"TABLE {t.name}: NOT AVAILABLE to role '{role}'. If the question needs it, set refuse=true.")
             out.append("")
             continue
         out.append(f"TABLE {t.name} -- {t.description}")
         for c in t.columns:
-            if c.restricted:
+            if c.restricted:   # omitted entirely so the model can't even name them
                 continue
             out.append(f"  {c.name} {c.type} -- {c.description}")
         out.append("")
@@ -245,6 +249,7 @@ class CatalogSlice:
     table_names: set[str] = field(default_factory=set)
 
     def __post_init__(self) -> None:
+        # derived, not passed in; the default_factory is only there so the field has a default
         self.table_names = {t.name for t in self.tables}
 
 

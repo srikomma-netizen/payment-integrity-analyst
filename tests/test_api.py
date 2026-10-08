@@ -6,6 +6,7 @@ from api.main import app
 
 @pytest.fixture(scope="module")
 def client():
+    # the context manager runs the lifespan, which builds the warehouse and the agent
     with TestClient(app) as c:
         yield c
 
@@ -40,6 +41,7 @@ def test_approval_round_trip(client):
     assert paused["status"] == "awaiting_approval" and paused["rows"] == []
     done = client.post(f"/runs/{paused['run_id']}/decision", json={"approved": True, "reviewer": "lead_2"}).json()
     assert done["status"] == "done" and done["row_count"] > 0
+    # reviewer_role defaults to siu_lead, so this reaches resume() and gets 409, not 403
     again = client.post(f"/runs/{paused['run_id']}/decision", json={"approved": True})
     assert again.status_code == 409
 
@@ -58,6 +60,7 @@ def test_console_and_static_assets_served(client):
 
 
 def test_pipeline_events_show_retry_and_guard_rejection(client):
+    # the golden script for this question hits a SQLite error on attempt 1, then succeeds
     retry = client.post("/ask", json={"question": "How many open cases are there?"}).json()
     nodes = [(e["attempt"], e["node"], e["outcome"]) for e in retry["events"]]
     assert (1, "execute", "error") in nodes and (2, "execute", "ok") in nodes
@@ -104,6 +107,7 @@ def test_schema_meta_outline_and_evals(client):
 
 def test_dashboard_cases_and_audit(client):
     d = client.get("/dashboard").json()
+    # 270 = 6 periods x 45 seeded claims
     assert d["kpis"]["claims"] == 270 and len(d["monthly"]) == 6 and {r["rule_id"] for r in d["by_rule"]} == {"R1", "R2", "R3", "R4", "R5"}
     cases = client.get("/cases").json()
     assert len(cases) == d["kpis"]["open_cases"] + d["kpis"]["closed_cases"]

@@ -1,120 +1,99 @@
-# Payment Integrity Analyst Agent
+# payment-integrity-analyst
 
-A natural-language analyst for a healthcare payment-integrity mart: claims,
-payments, providers, vendors, risk flags, and investigation cases. Built the
-way a regulated team would ship it: the model decides *what* to query,
-deterministic code decides *whether it may run*, the database decides *what
-the numbers are*, and the model is only allowed to narrate numbers that exist.
-PHI columns cannot be queried at all.
+Ask questions about healthcare claims and investigation data in plain English and
+get answers back as SQL, a table and a short narrative.
 
-Everything in this repo is synthetic. No real PHI.
+I've spent a lot of time on payment-integrity and fraud analytics, and the part
+that always worried me about text-to-SQL is trusting it with sensitive data. This
+project is me working through that: the model only *plans* the query, and plain
+code decides whether it's allowed to run.
+
+All data here is synthetic. No real members, providers or PHI.
 
 ```
-question ─▶ understand ─▶ guard ─▶ (SIU-lead approval?) ─▶ execute ─▶ compose ─▶ verify ─▶ answer
-                │            │
-                │            └─ rejected ─▶ back to understand with the reason (max 3 attempts)
-                ├─ ambiguous ─▶ ask one clarifying question
-                └─ not in catalog / not permitted ─▶ refuse
+question -> understand -> guard -> (SIU lead approval?) -> execute -> compose -> verify
+                ^           |
+                +-----------+  guard rejection or SQL error goes back as feedback (max 3 tries)
 ```
 
-Typical questions: how many claims each risk rule flagged last month, the
-false-positive rate of closed cases by rule, duplicate-payment overpayment
-totals, investigation cycle time by outcome, which vendors had unverified
-bank-change flags.
-
-## What is in here
-
-| Path | What it shows |
-|---|---|
-| `analyst/warehouse.py` | Synthetic SQLite payment-integrity mart (members, providers, vendors, claims, payments, risk_flags, cases, restricted investigator_notes), read-only executor with timeout and row cap |
-| `analyst/catalog.py` | Semantic layer: table and column docs, metric definitions (flag rate, false-positive rate, duplicate overpayment, days to close, recoveries), PHI columns marked restricted and hidden from the model |
-| `analyst/guard.py` | Deterministic SQL guard on a real parser: SELECT-only, table allow-list, role permissions, restricted PHI columns anywhere in the query, dangerous functions, LIMIT enforcement |
-| `analyst/llm.py` | Claude via the official SDK with structured outputs, plus a deterministic fake behind the same interface |
-| `analyst/workflow.py` | ~100-line state-graph runtime: typed state, routers, interrupts with checkpoints, resume, step limit |
-| `analyst/agent.py` | The analyst graph: understand, guard, approve, execute, compose, verify, with self-correction loops |
-| `analyst/evals/` | Golden set and runner. Scores result correctness against reference SQL, groundedness, PHI blocking, refusals, permissions, retries |
-| `docnav/` | Agentic navigation of a payment-integrity policy (outline, search, read with cross-references) versus flat-chunk RAG, with a retrieval-recall A/B |
-| `api/main.py` | FastAPI service: ask, list and inspect runs, approve or reject (SIU lead only), policy questions and outline, schema, evals, dashboard, cases, audit, and the web console |
-| `analyst/insights.py` | Fixed, reviewed dashboard and case queries for the console (no restricted columns) |
-| `web/` | The web console: `index.html`, `app.css`, `app.js` |
-| `tests/` | 48 tests, all offline (including stubbed Claude adapters and the console API) |
-
-## Run it
+## Running it
 
 ```bash
 pip install -r requirements.txt
-python scripts/demo.py                  # offline walkthrough with the fake LLM
-python -m analyst.evals.run_evals       # eval report
-python -m docnav.baseline               # flat chunks vs navigator
+uvicorn api.main:app --reload        # web console at http://localhost:8000
+python scripts/demo.py               # same flows in the terminal
+python -m analyst.evals.run_evals    # golden-set evals
 python -m pytest -q
-uvicorn api.main:app --reload           # then POST /ask, /policy/ask
 ```
 
-To use Claude, set `ANTHROPIC_API_KEY` (model defaults to `claude-opus-5-5`,
-override with `ANALYST_MODEL`). Everything else is unchanged: same graph,
-same guard, same evals.
+Without an `ANTHROPIC_API_KEY` it runs against a scripted stand-in model, which is
+what the tests use. Set the key to use Claude (`ANALYST_MODEL`, default
+`claude-opus-5-5`). Nothing else changes.
 
-```bash
-curl -s localhost:8000/ask -H 'content-type: application/json' \
-  -d '{"question":"What is the false positive rate of closed cases by rule?"}'
+## What's in here
+
+```
+analyst/
+  warehouse.py   synthetic SQLite mart: claims, payments, providers, vendors,
+                 risk_flags, cases, investigator_notes
+  catalog.py     table/column docs, metric definitions, which roles see what
+  guard.py       SQL guard (sqlglot): SELECT only, allow-listed tables, no
+                 restricted columns anywhere, LIMIT enforced
+  llm.py         Claude adapter (structured outputs) + the scripted stand-in
+  workflow.py    small state-graph runner with checkpoint/resume
+  agent.py       the analyst graph and the groundedness check
+  insights.py    fixed queries behind the dashboard and case worklist
+  evals/         golden questions and the eval runner
+docnav/          agent that reads the policy doc section by section
+api/main.py      FastAPI service + serves the console
+web/             the console (plain HTML/CSS/JS, no build step)
 ```
 
-## Web console
+## The console
 
-`uvicorn api.main:app` then open http://localhost:8000/. No build step: plain
-HTML, CSS and an ES module in `web/`, served by the same FastAPI app. The
-console is styled as an internal payment-integrity tool: navy navigation, a
-standing PHI compliance banner, and the validated chart palette.
+- **Overview**: claim volume, flag rate, open cases, false-positive rate by rule, provider risk.
+- **Case worklist**: filterable list of investigations, with a detail panel per case.
+- **Ask the data**: shows each step of the run, the SQL, the result as a chart or table, and the trace.
+- **SIU approvals**: queries on investigator notes wait here until an SIU lead approves them.
+- **Policy navigator**: shows which sections of the policy the agent read and in what order.
+- **Evaluation / Audit trail / Data catalog**: eval results, every query and what the guard did with it, and the schema as each role sees it.
 
-| Area | Screen | What it shows |
+Ctrl+K opens a command palette for jumping to pages, cases or asking a question.
+
+## Roles and PHI
+
+| Role | Can query | Needs approval |
 |---|---|---|
-| Operations | **Overview** | KPI tiles with monthly sparklines (claims, paid, flagged, open cases, false-positive rate, recoveries), flagged claims by month, rule performance with false-positive meters, case outcomes, provider risk, the SIU queue, and recent agent activity. Built from fixed, reviewed queries, not the model |
-| Operations | **Case worklist** | Severity-ranked investigations with search, status, severity, rule and owner filters, sortable columns, CSV export, and a case drawer: claim, pseudonymous member, risk signals with scores, payments with duplicate detection, member claim history, restricted-notes notice, and one-click agent follow-ups |
-| Operations | **SIU approvals** | Held queries with the SQL to review; approve or reject resumes the paused run. The server rejects decisions from any other role (403) |
-| Agent | **Ask the data** | Pipeline stepper (understand, guard, approve, execute, compose, verify) with per-attempt timeline, grounded answer, auto chart or sortable table, highlighted SQL, raw trace, run history |
-| Agent | **Policy navigator** | Outline with the agent's reading order, hop-by-hop reading path, citations, and a section reader with "refers to" and "cited by" links |
-| Governance | **Evaluation** | One-click golden-set run with KPIs, per-case results, capability roll-up, and the navigator-versus-flat-chunks retrieval chart |
-| Governance | **Audit trail** | Every query, PHI block, guard rejection, approval request and decision, refusal and failure, filterable and exportable |
-| Governance | **Data catalog** | Tables and columns exactly as the selected role sees them: locked tables, struck-through PHI columns, approval flags, metric definitions |
+| analyst | everything except investigator notes, pseudonymous member fields only | no |
+| siu_lead | also investigator notes | yes, for notes |
 
-Also: a Ctrl+K command palette (pages, case ids, providers, example questions,
-free-text questions), role switching from the sidebar, a collapsible sidebar,
-light and dark themes, and a phone layout with an overlay menu.
+`mrn`, `dob`, `npi` and `bank_account_last4` are blocked for everyone. They're left
+out of the schema the model sees, and the guard rejects any query that mentions
+them, including in filters and subqueries. The second part is the one that
+matters, because it doesn't depend on the model behaving.
 
-## Roles
+## Notes on a few choices
 
-| Role | Can query | Approval |
-|---|---|---|
-| `analyst` | claims, payments, providers, vendors, members (pseudonymous columns only), risk_flags, cases | none |
-| `siu_lead` | everything above plus `investigator_notes` | human approval before any notes query runs |
+- **The guard returns the SQL it validated, and that's what runs.** Otherwise you
+  check one string and execute another.
+- **Evals compare result rows, not SQL text.** Two different queries can both be
+  right. Each golden case has a reference query; both run against the same data.
+- **Numbers in the answer are checked against the rows.** If the model writes a
+  number that isn't in the result, the answer gets a caveat instead of going out
+  silently.
+- **Approval is a pause in the graph**, not an if-statement. The run is saved and
+  resumed by id once someone decides. The API also refuses decisions from
+  anyone who isn't an SIU lead.
+- **Policy questions use an agent that follows references** instead of grabbing
+  the top 3 chunks. Policy text says things like "as defined in Section 2.1",
+  and a chunk can't follow that. On 5 labelled questions, flat chunks found
+  57% of the needed sections and the navigator found all of them.
+- **Dashboard numbers don't come from the model.** They're fixed queries, so they
+  come out the same every time.
 
-`mrn`, `dob`, `npi`, and `bank_account_last4` are restricted for every role.
-They are absent from the schema the model sees and rejected by the guard if
-referenced anywhere, including filters and subqueries.
+## Things I'd do next
 
-## Design choices
-
-1. **The guard is code, not a prompt.** `guard.py` parses the SQL with sqlglot
-   and walks the AST. Prompt instructions are a hint; the parser is a control.
-   PHI columns are also removed from the schema the model sees, so the model
-   cannot even name them.
-2. **Result-level evals, not SQL-string evals.** Two different queries can be
-   equally correct. The golden set stores a *reference SQL*, runs both against
-   the same mart, and compares the rows. It also scores PHI blocking,
-   refusals, clarifications, permission denials, and self-correction, each
-   independently, so a failure points at the stage that broke.
-3. **Groundedness is checked, not assumed.** `verify` extracts every number in
-   the narrative and confirms it exists in the result set. Unsupported numbers
-   become a caveat on the answer.
-4. **Human approval is a graph interrupt, not an if-statement.** Sensitive
-   tables set a flag in the catalog; the guard turns it into a checkpoint; the
-   run is persisted and resumed by run id with the SIU lead's decision.
-5. **Agentic navigation over flat chunks when the system is not real-time.**
-   `docnav` gives the model outline, search, and read tools, and `read` returns
-   the section's cross-references. On expert-labelled policy questions the
-   navigator reaches 1.00 mean retrieval recall where top-3 flat chunks reach
-   0.57, because policy text says "as defined in Section 2.1" and a chunk
-   cannot follow that. `read` also returns the sections that cite the one
-   being read, so the agent can find a disposition rule that points back at
-   a definition.
-
+- Embedding search over the catalog once there are more than a handful of tables.
+- Run the evals against Claude on a schedule, not just the stand-in.
+- Small-cell suppression in the executor, so tiny groups can't be used to re-identify someone.
+- Swap SQLite for BigQuery. sqlglot already handles the dialect; the executor needs a bytes-billed cap.

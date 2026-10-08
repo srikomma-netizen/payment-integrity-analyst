@@ -1,12 +1,6 @@
-"""Synthetic healthcare payment-integrity mart (SQLite).
+"""Synthetic payment-integrity mart in SQLite: claims, payments, risk flags, cases.
 
-Deterministic seed so eval expectations are reproducible. No real data,
-no real PHI. The shape mirrors the analytics layer investigators query:
-claims and payments, the providers and vendors behind them, the risk flags
-raised by upstream controls, and the investigation cases those flags
-became. `members`, `providers` and `vendors` carry restricted identifier
-columns to demonstrate column-level controls, and `investigator_notes` is
-a sensitive table that requires SIU-lead role plus human approval.
+Seeded deterministically so eval expectations stay stable. No real data or PHI.
 """
 from __future__ import annotations
 
@@ -15,6 +9,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+# six monthly periods; the catalog and eval cases assume exactly this range
 PERIODS = [f"2025-{m:02d}" for m in range(1, 7)]
 
 PROVIDERS = [
@@ -33,6 +28,7 @@ VENDORS = [
     ("VND-703", "Aster Pharma Distribution", "Pharmaceuticals", "IE"),
 ]
 
+# code -> (description, base billed amount in USD)
 PROCEDURES = {
     "99213": ("Office visit, established patient", 110.0),
     "99214": ("Office visit, moderate complexity", 165.0),
@@ -44,6 +40,7 @@ PROCEDURES = {
     "29881": ("Knee arthroscopy", 2_400.0),
 }
 
+# rule_id -> (signal_type, severity); keep in sync with the risk_flags description in catalog.py
 RULES = {
     "R1": ("duplicate_payment", "high"),
     "R2": ("amount_outlier", "medium"),
@@ -52,6 +49,8 @@ RULES = {
     "R5": ("unverified_bank_change", "high"),
 }
 
+# mrn/dob, npi and bank_account_last4 exist only so the guard has restricted
+# columns to enforce; investigator_notes is the siu_lead + approval table.
 SCHEMA_SQL = """
 CREATE TABLE members (
     member_id TEXT PRIMARY KEY,
@@ -125,6 +124,8 @@ CREATE TABLE investigator_notes (
 
 
 def _seed(conn: sqlite3.Connection, seed: int = 7) -> None:
+    # every random draw goes through this one rng, so reordering any call
+    # below shifts the whole dataset and breaks the eval expectations
     rng = random.Random(seed)
     for i in range(40):
         conn.execute("INSERT INTO members VALUES (?,?,?,?,?)",
@@ -156,20 +157,23 @@ def _seed(conn: sqlite3.Connection, seed: int = 7) -> None:
             roll = rng.random()
             status = "paid" if roll < 0.82 else "denied" if roll < 0.92 else "pended"
             paid = round(billed * rng.uniform(0.7, 1.0), 2) if status == "paid" else 0.0
-            # planted anomalies
+            # planted anomalies, each tied to one rule so the flags have a real cause in the data
             flags: list[tuple[str, float]] = []
+            # R2: inflate a slice of high-complexity visits to ~3x base
             if claim_type == "professional" and code == "99215" and rng.random() < 0.35:
                 billed = round(base * rng.uniform(2.5, 3.2), 2); paid = round(billed * 0.9, 2) if status == "paid" else 0.0
                 flags.append(("R2", round(rng.uniform(0.5, 0.9), 2)))
             if claim_type == "professional" and code in ("80053", "85025") and rng.random() < 0.3:
                 flags.append(("R3", 0.55))
-            if provider == "PRV-500" and rng.random() < 0.4:
+            if provider == "PRV-500" and rng.random() < 0.4:   # one provider with a prior-case history
                 flags.append(("R4", 0.4))
+            # Summit Facilities is the vendor with the unverified bank change
             if claim_type == "vendor" and vendor == "VND-702" and rng.random() < 0.6:
                 flags.append(("R5", 0.85))
             conn.execute("INSERT INTO claims VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                          (cid, f"MBR-{2000 + rng.randint(0, 39)}", provider, vendor,
                           f"2025-{month:02d}-{day:02d}", period, claim_type, code, desc, billed, paid, status))
+            # only paid claims get a payment row; denied/pended have paid_amount 0
             if status == "paid":
                 payee = provider or vendor
                 conn.execute("INSERT INTO payments VALUES (?,?,?,?,?,?)",
@@ -184,7 +188,8 @@ def _seed(conn: sqlite3.Connection, seed: int = 7) -> None:
                              (f"FLG-{flag_no:04d}", cid, rule, sig, sev, score, f"2025-{month:02d}-{min(28, day + 10):02d}"))
                 flag_no += 1
 
-    # cases: one per flagged claim with prob, with outcomes and notes
+    # ~80% of flagged claims become a case; each case gets one note.
+    # Days are capped at 28 everywhere so we never build an invalid date.
     investigators = ["inv_4", "inv_7", "inv_9", "lead_2"]
     case_no = 400
     for (cid, flagged_date) in conn.execute("SELECT DISTINCT claim_id, MIN(flagged_date) FROM risk_flags GROUP BY claim_id").fetchall():
@@ -197,7 +202,7 @@ def _seed(conn: sqlite3.Connection, seed: int = 7) -> None:
                 status = "closed"
                 outcome = rng.choices(["confirmed", "false_positive", "closed_no_action"], [0.45, 0.35, 0.2])[0]
                 closed = f"2025-{min(7, month + rng.randint(0, 1)):02d}-{rng.randint(1, 28):02d}"
-                if closed <= opened:
+                if closed <= opened:   # ISO strings compare correctly; keeps days-to-close positive
                     closed = f"2025-{min(7, month + 1):02d}-{rng.randint(1, 28):02d}"
                 recovery = round(rng.uniform(150, 4_500), 2) if outcome == "confirmed" else 0.0
             else:
@@ -213,6 +218,7 @@ def _seed(conn: sqlite3.Connection, seed: int = 7) -> None:
 
 
 def build_warehouse(path: str = ":memory:", seed: int = 7) -> sqlite3.Connection:
+    # one shared connection is used from FastAPI's threadpool, hence check_same_thread=False
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
@@ -235,28 +241,27 @@ class QueryTimeout(Exception):
 
 def execute_readonly(conn: sqlite3.Connection, sql: str, *, timeout_s: float = 5.0,
                      max_rows: int = 200) -> QueryResult:
-    """Run an already-guarded SELECT with a wall-clock timeout and row cap.
-
-    The timeout uses SQLite's progress handler so a runaway query is
-    interrupted instead of hanging the worker.
-    """
+    """Run an already-guarded SELECT with a wall-clock timeout and row cap."""
     deadline = time.monotonic() + timeout_s
 
+    # a non-zero return from the progress handler makes SQLite abort with "interrupted"
     def _progress():
         return 1 if time.monotonic() > deadline else 0
 
-    conn.set_progress_handler(_progress, 1000)
+    # NOTE: SQLite only; a warehouse like BigQuery would need a job timeout / maximum_bytes_billed instead
+    conn.set_progress_handler(_progress, 1000)  # checked every 1000 VM instructions
     start = time.perf_counter()
     try:
         cur = conn.execute(sql)
         columns = [d[0] for d in cur.description] if cur.description else []
+        # fetch one extra row so we can tell "exactly max_rows" from "truncated"
         rows = [list(r) for r in cur.fetchmany(max_rows + 1)]
     except sqlite3.OperationalError as e:
         if "interrupted" in str(e).lower():
             raise QueryTimeout(f"query exceeded {timeout_s}s") from e
         raise
     finally:
-        conn.set_progress_handler(None, 0)
+        conn.set_progress_handler(None, 0)  # the connection is shared, don't leave the deadline armed
     truncated = len(rows) > max_rows
     rows = rows[:max_rows]
     return QueryResult(columns, rows, len(rows), (time.perf_counter() - start) * 1000, truncated)

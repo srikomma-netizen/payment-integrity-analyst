@@ -2,7 +2,7 @@ from analyst.evals.run_evals import load_golden, rows_equal, run_suite, summariz
 
 
 def test_rows_equal_semantics():
-    assert rows_equal([[1, 2.0]], [[1, 2.00004]], ordered=False)
+    assert rows_equal([[1, 2.0]], [[1, 2.00004]], ordered=False)  # inside the 1e-4 tolerance
     assert rows_equal([["a", 1], ["b", 2]], [["b", 2], ["a", 1]], ordered=False)
     assert not rows_equal([["a", 1], ["b", 2]], [["b", 2], ["a", 1]], ordered=True)
     assert not rows_equal([[1]], [[1], [2]], ordered=False)
