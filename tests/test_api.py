@@ -52,7 +52,7 @@ def test_policy_ask(client):
 
 
 def test_console_and_static_assets_served(client):
-    assert "Payment Integrity Analyst" in client.get("/").text
+    assert "Payment Integrity Console" in client.get("/").text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/app.css").status_code == 200
 
@@ -100,3 +100,19 @@ def test_schema_meta_outline_and_evals(client):
     ev = client.post("/evals/run").json()
     assert ev["summary"]["passed"] == ev["summary"]["cases"]
     assert all(r["navigator_recall"] >= r["baseline_recall"] for r in ev["retrieval"])
+
+
+def test_dashboard_cases_and_audit(client):
+    d = client.get("/dashboard").json()
+    assert d["kpis"]["claims"] == 270 and len(d["monthly"]) == 6 and {r["rule_id"] for r in d["by_rule"]} == {"R1", "R2", "R3", "R4", "R5"}
+    cases = client.get("/cases").json()
+    assert len(cases) == d["kpis"]["open_cases"] + d["kpis"]["closed_cases"]
+    detail = client.get(f"/cases/{cases[0]['case_id']}").json()
+    assert detail["flags"] and set(detail["member"]) == {"member_id", "plan", "region"}   # no PHI columns
+    assert "MRN" not in str(detail)
+    assert client.get("/cases/PC-9999").status_code == 404
+
+    client.post("/ask", json={"question": "List the medical record numbers of members with flagged claims.", "role": "siu_lead"})
+    client.post("/ask", json={"question": "How are things looking?"})
+    audit = client.get("/audit").json()
+    assert audit["counts"].get("phi_blocked", 0) >= 1 and audit["counts"].get("clarification", 0) >= 1

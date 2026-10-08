@@ -34,9 +34,10 @@ bank-change flags.
 | `analyst/agent.py` | The analyst graph: understand, guard, approve, execute, compose, verify, with self-correction loops |
 | `analyst/evals/` | Golden set and runner. Scores result correctness against reference SQL, groundedness, PHI blocking, refusals, permissions, retries |
 | `docnav/` | Agentic navigation of a payment-integrity policy (outline, search, read with cross-references) versus flat-chunk RAG, with a retrieval-recall A/B |
-| `api/main.py` | FastAPI service: ask, list and inspect runs, approve or reject (SIU lead only), policy questions and outline, schema, evals, and the web console |
+| `api/main.py` | FastAPI service: ask, list and inspect runs, approve or reject (SIU lead only), policy questions and outline, schema, evals, dashboard, cases, audit, and the web console |
+| `analyst/insights.py` | Fixed, reviewed dashboard and case queries for the console (no restricted columns) |
 | `web/` | The web console: `index.html`, `app.css`, `app.js` |
-| `tests/` | 47 tests, all offline (including stubbed Claude adapters and the console API) |
+| `tests/` | 48 tests, all offline (including stubbed Claude adapters and the console API) |
 
 ## Run it
 
@@ -61,18 +62,24 @@ curl -s localhost:8000/ask -H 'content-type: application/json' \
 ## Web console
 
 `uvicorn api.main:app` then open http://localhost:8000/. No build step: plain
-HTML, CSS and an ES module in `web/`, served by the same FastAPI app.
+HTML, CSS and an ES module in `web/`, served by the same FastAPI app. The
+console is styled as an internal payment-integrity tool: navy navigation, a
+standing PHI compliance banner, and the validated chart palette.
 
-| Screen | What it shows |
-|---|---|
-| **Ask** | Question composer with role-aware examples; a live pipeline stepper (understand, guard, approve, execute, compose, verify) with per-attempt timeline; the answer with interpretation, assumptions and groundedness; results as an auto-chosen chart (bars, or a line for monthly periods) or a sortable table; highlighted SQL; raw trace; run history |
-| **Approvals** | The SIU-lead queue of held queries with the SQL to review; approve or reject resumes the paused run. The server rejects decisions from any other role (403) |
-| **Policy** | The policy outline with the agent's reading order numbered, the hop-by-hop reading path, cited sections, and a section reader with "refers to" and "cited by" links |
-| **Evals** | One-click golden-set run with KPI tiles, per-case results, capability roll-up, and the navigator-versus-flat-chunks retrieval chart with a table view |
-| **Schema** | The catalog exactly as the selected role sees it: locked tables, struck-through PHI columns, approval flags, and metric definitions |
+| Area | Screen | What it shows |
+|---|---|---|
+| Operations | **Overview** | KPI tiles with monthly sparklines (claims, paid, flagged, open cases, false-positive rate, recoveries), flagged claims by month, rule performance with false-positive meters, case outcomes, provider risk, the SIU queue, and recent agent activity. Built from fixed, reviewed queries, not the model |
+| Operations | **Case worklist** | Severity-ranked investigations with search, status, severity, rule and owner filters, sortable columns, CSV export, and a case drawer: claim, pseudonymous member, risk signals with scores, payments with duplicate detection, member claim history, restricted-notes notice, and one-click agent follow-ups |
+| Operations | **SIU approvals** | Held queries with the SQL to review; approve or reject resumes the paused run. The server rejects decisions from any other role (403) |
+| Agent | **Ask the data** | Pipeline stepper (understand, guard, approve, execute, compose, verify) with per-attempt timeline, grounded answer, auto chart or sortable table, highlighted SQL, raw trace, run history |
+| Agent | **Policy navigator** | Outline with the agent's reading order, hop-by-hop reading path, citations, and a section reader with "refers to" and "cited by" links |
+| Governance | **Evaluation** | One-click golden-set run with KPIs, per-case results, capability roll-up, and the navigator-versus-flat-chunks retrieval chart |
+| Governance | **Audit trail** | Every query, PHI block, guard rejection, approval request and decision, refusal and failure, filterable and exportable |
+| Governance | **Data catalog** | Tables and columns exactly as the selected role sees them: locked tables, struck-through PHI columns, approval flags, metric definitions |
 
-Light and dark themes, keyboard shortcuts (`/` to focus, Ctrl+Enter to run), and a
-compact layout below 760px.
+Also: a Ctrl+K command palette (pages, case ids, providers, example questions,
+free-text questions), role switching from the sidebar, a collapsible sidebar,
+light and dark themes, and a phone layout with an overlay menu.
 
 ## Roles
 

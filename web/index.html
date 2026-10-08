@@ -3,66 +3,90 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Payment Integrity Analyst</title>
-  <meta name="description" content="Ask questions over the payment-integrity mart, review SIU approvals, navigate policy, and run evals.">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M9 17l5 5 9-12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/static/app.css">
+  <title>Payment Integrity Console</title>
+  <meta name="description" content="Payment-integrity operations: dashboard, case worklist, agentic analysis, SIU approvals, policy navigation, evals and audit.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b6e8a'/%3E%3Cpath d='M16 7v18M7 16h18' stroke='white' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css?v=3">
   <script>
-    try { const t = localStorage.getItem("pia-theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+    try {
+      const t = localStorage.getItem("pia-theme"); if (t) document.documentElement.dataset.theme = t;
+      if (localStorage.getItem("pia-nav") === "collapsed") document.documentElement.dataset.nav = "collapsed";
+    } catch (e) {}
   </script>
 </head>
 <body>
   <a class="skip" href="#view">Skip to content</a>
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M5 13l4 4 10-11" stroke="currentColor" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </span>
-      <div>
-        <div class="brand-title">Payment Integrity Analyst</div>
-        <div class="brand-sub">Text-to-SQL · PHI guard · SIU approvals · Policy navigation</div>
-      </div>
+
+  <aside class="sidebar" aria-label="Primary">
+    <div class="side-brand">
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 4v16M4 12h16" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg></span>
+      <div class="side-brand-text"><div class="product">Payment Integrity</div><div class="org">Special Investigations Unit</div></div>
     </div>
-    <div class="topbar-right">
-      <span class="pill pill-provider" id="provider" title="Model behind the agent">…</span>
-      <div class="segmented" role="radiogroup" aria-label="Acting role" id="roleSwitch">
+
+    <nav class="side-nav">
+      <div class="nav-group">Operations</div>
+      <a href="#/overview" data-view="overview"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4zM14 20h6v-9h-6zM4 20h6v-4H4zM14 4v4h6V4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Overview</span></a>
+      <a href="#/cases" data-view="cases"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v12H4zM9 7V5h6v2M4 12h16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Case worklist</span><b class="count" id="openCount" hidden></b></a>
+      <a href="#/approvals" data-view="approvals"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/></svg><span>SIU approvals</span><b class="count warn" id="queueBadge" hidden>0</b></a>
+
+      <div class="nav-group">Agent</div>
+      <a href="#/ask" data-view="ask"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H8l-4 4z M8 9h8 M8 12h5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"/></svg><span>Ask the data</span></a>
+      <a href="#/policy" data-view="policy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z M15 3v4h4 M9 11h7 M9 15h7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg><span>Policy navigator</span></a>
+
+      <div class="nav-group">Governance</div>
+      <a href="#/evals" data-view="evals"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10 M10 20V4 M16 20v-7 M21 20H3" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Evaluation</span></a>
+      <a href="#/audit" data-view="audit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2 M21 12a9 9 0 1 1-3-6.7 M21 4v4h-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Audit trail</span></a>
+      <a href="#/schema" data-view="schema"><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6 M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" fill="none" stroke="currentColor" stroke-width="1.7"/></svg><span>Data catalog</span></a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="user">
+        <span class="avatar" id="avatar" aria-hidden="true">AN</span>
+        <div class="user-text"><div class="user-name" id="userName">Analyst workspace</div><div class="user-role" id="userRole">Minimum-necessary access</div></div>
+      </div>
+      <div class="segmented side-role" role="radiogroup" aria-label="Acting role" id="roleSwitch">
         <button role="radio" data-role="analyst" aria-checked="true">Analyst</button>
         <button role="radio" data-role="siu_lead" aria-checked="false">SIU lead</button>
       </div>
-      <button class="icon-btn" id="themeBtn" aria-label="Toggle colour theme" title="Toggle theme">
-        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="currentColor"/></svg>
-      </button>
     </div>
-  </header>
+  </aside>
 
-  <div class="shell">
-    <nav class="rail" aria-label="Sections">
-      <a href="#/ask" data-view="ask">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v10H8l-4 4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-        <span>Ask</span>
-      </a>
-      <a href="#/approvals" data-view="approvals">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v6c0 4-3 7-7 9-4-2-7-5-7-9V6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M9 12l2 2 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span>Approvals</span><b class="badge" id="queueBadge" hidden>0</b>
-      </a>
-      <a href="#/policy" data-view="policy">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h9l4 4v14H6z M15 3v4h4 M9 11h7 M9 15h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
-        <span>Policy</span>
-      </a>
-      <a href="#/evals" data-view="evals">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20V10 M10 20V4 M16 20v-7 M22 20H2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span>Evals</span>
-      </a>
-      <a href="#/schema" data-view="schema">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6 M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
-        <span>Schema</span>
-      </a>
-    </nav>
+  <div class="frame">
+    <div class="compliance" role="note">
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 1.8l5 2v4.1c0 3-2.2 5.1-5 6.3-2.8-1.2-5-3.3-5-6.3V3.8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      <span><b>Synthetic data</b> · PHI de-identified before any model call · Minimum-necessary access by role · Every query audited</span>
+    </div>
+    <header class="topbar">
+      <button class="icon-btn nav-toggle" id="navToggle" aria-label="Toggle navigation"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+      <nav class="crumbs" aria-label="Breadcrumb"><span class="muted" id="crumbGroup">Operations</span><span class="sep">/</span><span id="crumbPage">Overview</span></nav>
+      <button class="search" id="paletteBtn" aria-label="Open command palette">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span>Search cases, ask a question, jump to…</span><span class="kbd">Ctrl K</span>
+      </button>
+      <div class="top-right">
+        <span class="env" id="provider" title="Model behind the agent">…</span>
+        <button class="icon-btn" id="themeBtn" aria-label="Toggle colour theme" title="Toggle theme">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="currentColor"/></svg>
+        </button>
+      </div>
+    </header>
     <main id="view" tabindex="-1" aria-live="polite"></main>
+  </div>
+
+  <div class="drawer-scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" aria-label="Case detail" aria-hidden="true" tabindex="-1"></aside>
+
+  <div class="palette-scrim" id="paletteScrim" hidden>
+    <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div class="palette-input"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="paletteInput" placeholder="Type a case id, provider, page, or a question…" autocomplete="off" aria-label="Command"></div>
+      <ul class="palette-list" id="paletteList" role="listbox"></ul>
+      <div class="palette-foot"><span><span class="kbd">↑</span><span class="kbd">↓</span> navigate</span><span><span class="kbd">Enter</span> select</span><span><span class="kbd">Esc</span> close</span></div>
+    </div>
   </div>
 
   <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
   <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
-  <script type="module" src="/static/app.js"></script>
+  <script type="module" src="/static/app.js?v=3"></script>
 </body>
 </html>

@@ -13,6 +13,11 @@ const state = {
   outline: null,
   activeSection: null,
   evals: null,
+  cases: null,
+  caseFilters: { q: "", status: "open", severity: "all", rule: "all", investigator: "all" },
+  caseSort: { key: "severity", asc: false },
+  auditFilter: "all",
+  pendingAsk: null,
 };
 try { state.role = localStorage.getItem("pia-role") || "analyst"; } catch (e) {}
 
@@ -143,7 +148,7 @@ function niceMax(v) {
   return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p;
 }
 
-function hBarChart({ labels, values, colLabel, valueCol, width = 720 }) {
+function hBarChart({ labels, values, colLabel, valueCol, width = 720, title = true }) {
   const labelW = Math.min(220, Math.max(70, Math.max(...labels.map((l) => String(l).length)) * 7.2 + 12));
   const barH = Math.min(24, 22), gap = 10, top = 22, padR = 70;
   const h = top + labels.length * (barH + gap) + 6;
@@ -165,10 +170,10 @@ function hBarChart({ labels, values, colLabel, valueCol, width = 720 }) {
     g += `<rect class="hit" x="0" y="${y - gap / 2}" width="${width}" height="${barH + gap}" data-tip="${esc(tip)}"/>`;
   });
   g += `<line class="axis" x1="${labelW}" x2="${labelW}" y1="${top - 6}" y2="${h}" stroke="var(--border-strong)"/>`;
-  return `<div class="chart"><div class="chart-title">${esc(valueCol)} by ${esc(colLabel)}</div><svg viewBox="0 0 ${width} ${h}" role="img" aria-label="Bar chart of ${esc(valueCol)} by ${esc(colLabel)}">${g}</svg></div>`;
+  return `<div class="chart">${title ? `<div class="chart-title">${esc(valueCol)} by ${esc(colLabel)}</div>` : ""}<svg viewBox="0 0 ${width} ${h}" role="img" aria-label="Bar chart of ${esc(valueCol)} by ${esc(colLabel)}">${g}</svg></div>`;
 }
 
-function lineChart({ labels, values, colLabel, valueCol, width = 720, height = 240 }) {
+function lineChart({ labels, values, colLabel, valueCol, width = 720, height = 240, title = true }) {
   const padL = 56, padR = 24, top = 18, bottom = 28;
   const max = niceMax(Math.max(...values, 0));
   const plotW = width - padL - padR, plotH = height - top - bottom;
@@ -191,7 +196,7 @@ function lineChart({ labels, values, colLabel, valueCol, width = 720, height = 2
     g += `<rect class="hit" data-cross="${x(i)}" x="${x(i) - band / 2}" y="${top}" width="${band}" height="${plotH}" data-tip="${esc(tip)}"/>`;
   });
   g += `<line class="cross" id="cross" x1="0" x2="0" y1="${top}" y2="${top + plotH}" visibility="hidden"/>`;
-  return `<div class="chart"><div class="chart-title">${esc(valueCol)} by ${esc(colLabel)}</div><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Line chart of ${esc(valueCol)} over ${esc(colLabel)}">${g}</svg></div>`;
+  return `<div class="chart">${title ? `<div class="chart-title">${esc(valueCol)} by ${esc(colLabel)}</div>` : ""}<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Line chart of ${esc(valueCol)} over ${esc(colLabel)}">${g}</svg></div>`;
 }
 
 function bindCrosshair(root) {
@@ -240,8 +245,16 @@ function bindSort(table, columns, rows) {
 function setRole(role) {
   state.role = role;
   try { localStorage.setItem("pia-role", role); } catch (e) {}
-  document.querySelectorAll("#roleSwitch button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.role === role)));
+  syncIdentity();
   route();
+}
+function syncIdentity() {
+  document.querySelectorAll("#roleSwitch button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.role === state.role)));
+  const lead = state.role === "siu_lead";
+  $("#avatar").textContent = lead ? "SL" : "AN";
+  $("#avatar").style.background = lead ? "#7a4b00" : "#1f5874";
+  $("#userName").textContent = lead ? "SIU lead workspace" : "Analyst workspace";
+  $("#userRole").textContent = lead ? "Approves sensitive queries" : "Minimum-necessary access";
 }
 document.querySelectorAll("#roleSwitch button").forEach((b) => b.addEventListener("click", () => setRole(b.dataset.role)));
 $("#themeBtn").addEventListener("click", () => {
@@ -417,6 +430,7 @@ async function renderAsk() {
     try { state.run = await api(`/runs/${b.dataset.run}`); renderAsk(); } catch (e) { toast(e.message, true); }
   }));
   if (state.run) bindRunCard($("#runCard"), state.run);
+  if (state.pendingAsk) { const q = state.pendingAsk; state.pendingAsk = null; ta.value = q; ask(q); }
   bindTooltips(view);
 }
 
@@ -606,12 +620,387 @@ async function renderSchema() {
       ${sc.metrics.map((m) => `<div class="metric"><b class="mono">${esc(m.name)}</b><div class="secondary">${esc(m.definition)}</div><code>${esc(m.sql_hint)}</code></div>`).join("")}</div>`;
 }
 
+// ======================================================================
+// Shell: navigation toggle, command palette, counts
+// ======================================================================
+const money = (v, digits = 0) => "$" + Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+const pct = (v, d = 1) => (v == null ? "n/a" : (v * 100).toFixed(d) + "%");
+const sevBadge = (s) => `<span class="sev ${esc(s)}"><i></i>${esc(s[0].toUpperCase() + s.slice(1))}</span>`;
+const OUTCOME = {
+  confirmed: ["pill-bad", "Confirmed"], false_positive: ["pill-good", "False positive"],
+  closed_no_action: ["", "No action"], open: ["pill-info", "Open"],
+};
+const outcomePill = (status, outcome) => {
+  const [cls, label] = OUTCOME[status === "open" ? "open" : outcome] || ["", outcome || status];
+  return `<span class="pill ${cls}">${esc(label)}</span>`;
+};
+
+function initShell() {
+  $("#navToggle").addEventListener("click", () => {
+    const root = document.documentElement;
+    if (matchMedia("(max-width: 900px)").matches) {
+      if (root.getAttribute("data-nav-open") === "true") root.removeAttribute("data-nav-open");
+      else root.setAttribute("data-nav-open", "true");
+      return;
+    }
+    const collapsed = root.dataset.nav === "collapsed";
+    if (collapsed) delete root.dataset.nav; else root.dataset.nav = "collapsed";
+    try { localStorage.setItem("pia-nav", collapsed ? "" : "collapsed"); } catch (e) {}
+  });
+  $("#paletteBtn").addEventListener("click", openPalette);
+  addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); }
+    if (e.key === "Escape") { closePalette(); closeDrawer(); }
+  });
+  $("#paletteScrim").addEventListener("click", (e) => { if (e.target.id === "paletteScrim") closePalette(); });
+  $("#scrim").addEventListener("click", closeDrawer);
+  // On small screens the sidebar overlays the page; a tap outside it closes it.
+  document.querySelector(".frame").addEventListener("click", (e) => {
+    if (document.documentElement.getAttribute("data-nav-open") === "true" && !e.target.closest("#navToggle")) {
+      document.documentElement.removeAttribute("data-nav-open");
+    }
+  });
+}
+
+async function loadCases(force = false) {
+  if (!state.cases || force) state.cases = await api("/cases");
+  return state.cases;
+}
+async function refreshOpenCount() {
+  try {
+    const cs = await loadCases();
+    const n = cs.filter((c) => c.status === "open").length;
+    const b = $("#openCount"); b.textContent = n; b.hidden = !n;
+  } catch (e) {}
+}
+
+// ---- command palette ----
+let paletteItems = [], paletteIdx = 0;
+const PAGES = Object.entries({ overview: "Overview", cases: "Case worklist", approvals: "SIU approvals", ask: "Ask the data",
+  policy: "Policy navigator", evals: "Evaluation", audit: "Audit trail", schema: "Data catalog" });
+
+async function openPalette() {
+  $("#paletteScrim").hidden = false;
+  const input = $("#paletteInput");
+  input.value = "";
+  input.focus();
+  await loadCases().catch(() => []);
+  renderPalette("");
+  input.oninput = () => renderPalette(input.value);
+  input.onkeydown = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); paletteIdx = Math.min(paletteIdx + 1, paletteItems.length - 1); paintPalette(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); paletteIdx = Math.max(paletteIdx - 1, 0); paintPalette(); }
+    else if (e.key === "Enter") { e.preventDefault(); paletteItems[paletteIdx]?.run(); }
+  };
+}
+function closePalette() { $("#paletteScrim").hidden = true; }
+
+function renderPalette(text) {
+  const q = text.trim().toLowerCase();
+  const items = [];
+  const exampleHits = (state.meta?.examples || []).filter((e) => !q || e.question.toLowerCase().includes(q)).slice(0, q ? 6 : 4);
+  if (q && exampleHits.length) exampleHits.forEach((e) => items.push({ grp: "Example questions", label: e.question, kind: roleLabel(e.role), run: () => goAsk(e.question) }));
+  if (q.length >= 3) items.push({ grp: "Ask the agent", label: `Ask: "${text.trim()}"`, kind: roleLabel(state.role), run: () => goAsk(text.trim()) });
+  PAGES.filter(([, l]) => !q || l.toLowerCase().includes(q)).forEach(([k, l]) =>
+    items.push({ grp: "Go to", label: l, kind: "page", run: () => { closePalette(); location.hash = `#/${k}`; } }));
+  (state.cases || []).filter((c) => q && (c.case_id.toLowerCase().includes(q) || c.claim_id.toLowerCase().includes(q) || (c.counterparty || "").toLowerCase().includes(q)))
+    .slice(0, 8).forEach((c) => items.push({
+      grp: "Cases", label: `${c.case_id} · ${c.counterparty || ""} · ${c.procedure_code}`,
+      kind: c.status === "open" ? "open case" : (c.outcome || "").replace("_", " "),
+      run: () => { closePalette(); openCase(c.case_id); },
+    }));
+  if (!q) exampleHits.forEach((e) => items.push({ grp: "Example questions", label: e.question, kind: roleLabel(e.role), run: () => goAsk(e.question) }));
+  paletteItems = items; paletteIdx = 0; paintPalette();
+}
+function paintPalette() {
+  let last = "";
+  $("#paletteList").innerHTML = paletteItems.map((it, i) => {
+    const head = it.grp !== last ? `<li class="grp" aria-hidden="true">${esc(it.grp)}</li>` : "";
+    last = it.grp;
+    return `${head}<li role="option" data-i="${i}" aria-selected="${i === paletteIdx}">${esc(it.label)}<span class="kind">${esc(it.kind)}</span></li>`;
+  }).join("") || `<li class="grp">No matches</li>`;
+  $("#paletteList").querySelectorAll("[data-i]").forEach((li) => {
+    li.addEventListener("click", () => paletteItems[+li.dataset.i].run());
+    li.addEventListener("mousemove", () => { if (paletteIdx !== +li.dataset.i) { paletteIdx = +li.dataset.i; paintPalette(); } });
+  });
+  $("#paletteList [aria-selected='true']")?.scrollIntoView({ block: "nearest" });
+}
+function goAsk(q) {
+  closePalette();
+  state.pendingAsk = q;
+  if (location.hash === "#/ask") renderAsk(); else location.hash = "#/ask";
+}
+
+// ======================================================================
+// OVERVIEW
+// ======================================================================
+function sparkline(values, label, fmtv) {
+  if (!values.length) return "";
+  const w = 200, h = 34, pad = 4;
+  const max = Math.max(...values), min = Math.min(...values);
+  const span = max - min || 1;
+  const x = (i) => pad + (i / (values.length - 1 || 1)) * (w - pad * 2);
+  const y = (v) => h - pad - ((v - min) / span) * (h - pad * 2);
+  const line = values.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(values.length - 1)},${h} L${x(0)},${h} Z`;
+  const tip = `<b>${esc(label)}</b><br>Jan ${esc(fmtv(values[0]))} → Jun ${esc(fmtv(values[values.length - 1]))}<br>peak ${esc(fmtv(max))}`;
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" data-tip="${esc(tip)}" role="img" aria-label="${esc(label)} trend"><path class="a" d="${area}"/><path class="l" d="${line}" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+async function renderOverview() {
+  const [d, audit] = await Promise.all([api("/dashboard"), api("/audit?limit=8").catch(() => ({ events: [] }))]);
+  const k = d.kpis, m = d.monthly;
+  const tiles = [
+    ["Claims adjudicated", k.claims.toLocaleString(), `${m.length} months · Jan–Jun 2025`, sparkline(m.map((r) => r.claims), "Claims per month", (v) => v.toLocaleString())],
+    ["Paid amount", money(k.paid_amount), "disbursed on paid claims", sparkline(m.map((r) => r.paid_amount), "Paid per month", (v) => money(v))],
+    ["Flagged claims", k.flagged_claims.toLocaleString(), `${pct(k.flag_rate)} of all claims`, sparkline(m.map((r) => r.flagged), "Flagged claims per month", (v) => String(v))],
+    ["Open cases", k.open_cases.toLocaleString(), `avg ${k.avg_days_to_close.toFixed(1)} days to close`, ""],
+    ["False-positive rate", pct(k.false_positive_rate), `of ${k.closed_cases} closed cases`, ""],
+    ["Recovered", money(k.recovered), `${k.duplicate_claims} duplicate payments · ${money(k.overpaid)} overpaid`, ""],
+  ];
+  const fpMax = Math.max(...d.by_rule.map((r) => r.false_positive_rate || 0), 0.01);
+  const queueHtml = d.queue.length
+    ? d.queue.slice(0, 4).map((r) => `<div class="qitem"><span class="pill pill-warn">${ICON.pending}</span><div><div class="t">${esc(r.question)}</div><div class="muted" style="font-size:12px">${esc(r.tables.join(", "))} · ${timeAgo(r.created_at)}</div></div></div>`).join("")
+    : `<div class="empty" style="padding:20px 0">${ICON.ok}<div>No queries waiting for approval.</div></div>`;
+  const activityHtml = audit.events.length
+    ? audit.events.slice(0, 6).map((e) => `<div class="qitem">${auditBadge(e)}<div><div class="t" style="font-weight:550">${esc(e.detail)}</div><div class="muted" style="font-size:12px">${esc(roleLabel(e.role))} · ${timeAgo(e.ts)}</div></div></div>`).join("")
+    : `<div class="muted" style="font-size:12.5px">No agent activity yet in this session.</div>`;
+  const ruleRows = d.by_rule.map((r) => `<tr><td><span class="rule">${esc(r.rule_id)}</span></td><td>${esc(r.signal_type.replaceAll("_", " "))}</td><td>${sevBadge(r.severity)}</td><td class="num">${r.flags}</td><td class="num">${r.closed}</td>
+      <td><div class="row" style="gap:8px;flex-wrap:nowrap"><div class="meter" style="flex:1" data-tip="${esc(`<b>${r.rule_id}</b> ${r.false_positive} of ${r.closed} closed cases were false positives`)}"><i style="width:${((r.false_positive_rate || 0) / fpMax) * 100}%"></i></div><span class="num-t" style="min-width:40px;text-align:right">${pct(r.false_positive_rate, 0)}</span></div></td></tr>`).join("");
+  const providerRows = d.providers.map((p) => `<tr><td><b>${esc(p.name)}</b><span class="sub2 mono">${esc(p.provider_id)}</span></td><td>${esc(p.specialty)}</td><td class="num">${p.claims}</td><td class="num">${p.flagged}</td>
+      <td><div class="row" style="gap:8px;flex-wrap:nowrap"><div class="meter" style="flex:1" data-tip="${esc(`<b>${p.name}</b><br>${p.flagged} of ${p.claims} claims flagged`)}"><i style="width:${p.flag_rate * 100}%"></i></div><span class="num-t" style="min-width:40px;text-align:right">${pct(p.flag_rate, 0)}</span></div></td><td class="num">${money(p.billed)}</td></tr>`).join("");
+
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Payment integrity overview</h1><p>Book of business, detection performance, and investigation outcomes. Figures come from fixed, reviewed queries over the de-identified mart, not from the model.</p></div>
+      <div class="page-actions"><a class="btn" href="#/cases">Open worklist</a><button class="btn btn-primary" id="dashAsk">${ICON.play} Ask a question</button></div></div>
+    <div class="kpis six">${tiles.map(([l, v, n, sp], i) => `<div class="card card-pad kpi ${i === 3 ? "accent" : ""}"><div class="label">${esc(l)}</div><div class="value">${esc(v)}</div><div class="note">${esc(n)}</div>${sp}</div>`).join("")}</div>
+    <div class="dash-grid">
+      <section class="card card-pad span-8"><div class="card-head"><h2>Flagged claims by month</h2><span class="sub">distinct claims with at least one risk flag</span></div>
+        ${lineChart({ labels: m.map((r) => r.period), values: m.map((r) => r.flagged), colLabel: "month", valueCol: "flagged claims", title: false, height: 230 })}</section>
+      <section class="card card-pad span-4"><div class="card-head"><h2>SIU approval queue</h2><a href="#/approvals" class="sub">View all</a></div>${queueHtml}
+        <div class="card-head" style="margin:18px 0 6px"><h2>Recent agent activity</h2><a href="#/audit" class="sub">Audit trail</a></div>${activityHtml}</section>
+      <section class="card card-pad span-6"><div class="card-head"><h2>Rule performance</h2><span class="sub">closed-case false-positive rate by rule</span></div>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Rule</th><th>Signal</th><th>Base severity</th><th class="num">Flags</th><th class="num">Closed</th><th>False-positive rate</th></tr></thead><tbody>${ruleRows}</tbody></table></div></section>
+      <section class="card card-pad span-6"><div class="card-head"><h2>Case outcomes</h2><span class="sub">${d.outcomes.reduce((a, o) => a + o.cases, 0)} investigations</span></div>
+        ${hBarChart({ labels: d.outcomes.map((o) => (OUTCOME[o.outcome]?.[1] || o.outcome)), values: d.outcomes.map((o) => o.cases), colLabel: "outcome", valueCol: "cases", title: false, width: 560 })}</section>
+      <section class="card card-pad span-12"><div class="card-head"><h2>Provider risk</h2><span class="sub">share of each provider's claims carrying a risk flag</span></div>
+        <div class="table-wrap"><table class="data"><thead><tr><th>Provider</th><th>Specialty</th><th class="num">Claims</th><th class="num">Flagged</th><th style="width:30%">Flag rate</th><th class="num">Billed</th></tr></thead><tbody>${providerRows}</tbody></table></div></section>
+    </div>`;
+  $("#dashAsk").addEventListener("click", () => { location.hash = "#/ask"; });
+  bindTooltips(view); bindCrosshair(view);
+}
+
+// ======================================================================
+// CASE WORKLIST + DRAWER
+// ======================================================================
+const SEV_ORDER = { high: 3, medium: 2, low: 1 };
+function filteredCases() {
+  const f = state.caseFilters;
+  const q = f.q.trim().toLowerCase();
+  let rows = state.cases.filter((c) =>
+    (f.status === "all" || c.status === f.status) &&
+    (f.severity === "all" || c.severity === f.severity) &&
+    (f.rule === "all" || c.rules.includes(f.rule)) &&
+    (f.investigator === "all" || c.investigator === f.investigator) &&
+    (!q || [c.case_id, c.claim_id, c.counterparty, c.procedure_code, c.procedure_desc, c.member_id].some((v) => String(v || "").toLowerCase().includes(q))));
+  const { key, asc } = state.caseSort;
+  const val = (c) => (key === "severity" ? SEV_ORDER[c.severity] * 1000 + (c.max_score || 0) : Array.isArray(c[key]) ? c[key].join(",") : c[key]);
+  return [...rows].sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : 0) * (asc ? 1 : -1));
+}
+
+function downloadCsv(filename, head, rows) {
+  const cell = (v) => `"${String(Array.isArray(v) ? v.join(" ") : v ?? "").replaceAll('"', '""')}"`;
+  const csv = [head.join(",")].concat(rows.map((r) => head.map((h) => cell(r[h])).join(","))).join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function renderCases() {
+  await loadCases();
+  const all = state.cases, f = state.caseFilters;
+  const investigators = [...new Set(all.map((c) => c.investigator))].sort();
+  const opt = (v, cur, label = v) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(label)}</option>`;
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Case worklist</h1><p>Investigations opened from flagged claims, prioritised by severity and model score. Members appear by pseudonymous id only; identity resolution happens outside this console under minimum-necessary rules.</p></div>
+      <div class="page-actions"><button class="btn" id="exportCases">Export CSV</button></div></div>
+    <div class="card card-pad">
+      <div class="toolbar" role="search">
+        <label class="field"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16 16l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          <input id="cq" placeholder="Case, claim, provider, CPT…" value="${esc(f.q)}" aria-label="Search cases"></label>
+        <select class="sel" id="cstatus" aria-label="Status">${opt("all", f.status, "All statuses")}${opt("open", f.status, "Open")}${opt("closed", f.status, "Closed")}</select>
+        <select class="sel" id="csev" aria-label="Severity">${opt("all", f.severity, "All severities")}${opt("high", f.severity, "High")}${opt("medium", f.severity, "Medium")}${opt("low", f.severity, "Low")}</select>
+        <select class="sel" id="crule" aria-label="Rule">${opt("all", f.rule, "All rules")}${["R1", "R2", "R3", "R4", "R5"].map((r) => opt(r, f.rule)).join("")}</select>
+        <select class="sel" id="cinv" aria-label="Investigator">${opt("all", f.investigator, "All investigators")}${investigators.map((i) => opt(i, f.investigator)).join("")}</select>
+        <span class="spacer"></span><span class="muted" id="ccount"></span>
+      </div>
+      <div id="caseTable"></div>
+    </div>`;
+  const cols = [["case_id", "Case"], ["severity", "Severity"], ["rules", "Signals"], ["counterparty", "Counterparty"], ["procedure_code", "Procedure"],
+    ["billed_amount", "Billed", "num"], ["status", "Status"], ["investigator", "Owner"], ["age_days", "Age", "num"]];
+  const paint = () => {
+    const rows = filteredCases();
+    $("#ccount").textContent = `${rows.length} of ${all.length} cases`;
+    const { key, asc } = state.caseSort;
+    $("#caseTable").innerHTML = rows.length ? `<div class="table-wrap" style="max-height:none"><table class="data"><thead><tr>${cols.map(([k2, l, c]) =>
+      `<th class="${c || ""}" data-sort="${k2}" aria-sort="${key === k2 ? (asc ? "ascending" : "descending") : "none"}">${esc(l)}<span class="dir">${key === k2 ? (asc ? "▲" : "▼") : ""}</span></th>`).join("")}</tr></thead>
+      <tbody>${rows.map((c) => `<tr class="clickable" tabindex="0" data-case="${esc(c.case_id)}">
+        <td><span class="idcell">${esc(c.case_id)}</span><span class="sub2">${esc(c.claim_id)}</span></td>
+        <td>${sevBadge(c.severity)}<span class="sub2">score ${(c.max_score ?? 0).toFixed(2)}</span></td>
+        <td>${c.rules.map((r) => `<span class="rule">${esc(r)}</span>`).join("")}</td>
+        <td>${esc(c.counterparty || "n/a")}<span class="sub2">${esc(c.claim_type)} · ${esc(c.counterparty_id || "")}</span></td>
+        <td><span class="mono">${esc(c.procedure_code)}</span><span class="sub2">${esc(c.procedure_desc)}</span></td>
+        <td class="num">${money(c.billed_amount, 2)}</td>
+        <td>${outcomePill(c.status, c.outcome)}</td>
+        <td class="mono">${esc(c.investigator)}</td>
+        <td class="num">${c.age_days}d</td></tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">${ICON.info}<div>No cases match these filters.</div></div>`;
+    $("#caseTable").querySelectorAll("[data-sort]").forEach((th) => th.addEventListener("click", () => {
+      const k2 = th.dataset.sort;
+      state.caseSort = { key: k2, asc: state.caseSort.key === k2 ? !state.caseSort.asc : k2 !== "severity" };
+      paint();
+    }));
+    $("#caseTable").querySelectorAll("[data-case]").forEach((tr) => {
+      tr.addEventListener("click", () => openCase(tr.dataset.case));
+      tr.addEventListener("keydown", (e) => { if (e.key === "Enter") openCase(tr.dataset.case); });
+    });
+  };
+  const bind = (id, key) => $(id).addEventListener(id === "#cq" ? "input" : "change", (e) => { state.caseFilters[key] = e.target.value; paint(); });
+  bind("#cq", "q"); bind("#cstatus", "status"); bind("#csev", "severity"); bind("#crule", "rule"); bind("#cinv", "investigator");
+  $("#exportCases").addEventListener("click", () => {
+    const rows = filteredCases();
+    downloadCsv("payment-integrity-cases.csv", ["case_id", "claim_id", "severity", "max_score", "rules", "counterparty", "claim_type", "procedure_code",
+      "billed_amount", "status", "outcome", "investigator", "age_days", "member_id"], rows);
+    toast(`Exported ${rows.length} cases`);
+  });
+  paint();
+}
+
+let drawerReturnFocus = null;
+async function openCase(caseId) {
+  drawerReturnFocus = document.activeElement;
+  const dr = $("#drawer");
+  dr.innerHTML = `<div class="drawer-head"><div class="skeleton" style="width:50%"></div></div><div class="drawer-body"><div class="skeleton"></div><div class="skeleton" style="width:80%"></div></div>`;
+  $("#scrim").hidden = false; dr.classList.add("open"); dr.setAttribute("aria-hidden", "false");
+  try {
+    const c = await api(`/cases/${encodeURIComponent(caseId)}`);
+    const dupes = c.payments.length > 1;
+    const flagRows = c.flags.map((f) => `<tr><td><span class="rule">${esc(f.rule_id)}</span></td><td>${esc(f.signal_type.replaceAll("_", " "))}</td><td>${sevBadge(f.severity)}</td>
+        <td><div class="row" style="gap:8px;flex-wrap:nowrap"><div class="meter" style="flex:1"><i style="width:${f.score * 100}%"></i></div><span class="num-t">${f.score.toFixed(2)}</span></div></td><td class="mono">${esc(f.flagged_date)}</td></tr>`).join("");
+    const payRows = c.payments.map((p) => `<tr><td class="mono">${esc(p.payment_id)}</td><td class="mono">${esc(p.paid_date)}</td><td class="mono">${esc(p.payee_id)}</td><td>${esc(p.method)}</td><td class="num">${money(p.amount, 2)}</td></tr>`).join("");
+    const histRows = c.member_history.map((h) => `<tr${h.claim_id === c.claim_id ? ' style="font-weight:650"' : ""}><td class="mono">${esc(h.claim_id)}</td><td class="mono">${esc(h.service_date)}</td><td class="mono">${esc(h.procedure_code)}</td><td>${esc(h.status)}</td><td class="num">${money(h.billed_amount, 2)}</td></tr>`).join("");
+    const lead = state.role === "siu_lead";
+    dr.innerHTML = `
+      <div class="drawer-head"><div style="flex:1">
+          <div class="row" style="gap:8px"><span class="idcell" style="font-size:16px">${esc(c.case_id)}</span>${sevBadge(c.severity)}${outcomePill(c.status, c.outcome)}</div>
+          <div class="secondary" style="margin-top:4px">${esc(c.procedure_desc)} · ${esc(c.counterparty || "")}</div></div>
+        <button class="icon-btn" id="closeDrawer" aria-label="Close case detail"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+      <div class="drawer-body">
+        <div class="section"><h3>Claim</h3><dl class="kv">
+          <dt>Claim</dt><dd class="mono">${esc(c.claim_id)} · ${esc(c.claim_type)}</dd>
+          <dt>Service date</dt><dd>${esc(c.service_date)} <span class="muted">(${esc(c.period)})</span></dd>
+          <dt>Procedure</dt><dd><span class="mono">${esc(c.procedure_code)}</span> ${esc(c.procedure_desc)}</dd>
+          <dt>Counterparty</dt><dd>${esc(c.counterparty || "n/a")} <span class="muted mono">${esc(c.counterparty_id || "")}</span></dd>
+          <dt>Billed / paid</dt><dd class="num-t">${money(c.billed_amount, 2)} / ${money(c.paid_amount, 2)}</dd>
+          <dt>Owner</dt><dd class="mono">${esc(c.investigator)}</dd>
+          <dt>Opened</dt><dd>${esc(c.opened_date)}${c.closed_date ? ` · closed ${esc(c.closed_date)}` : ""} <span class="muted">(${c.age_days} days)</span></dd>
+          ${c.recovery_amount ? `<dt>Recovered</dt><dd class="num-t">${money(c.recovery_amount, 2)}</dd>` : ""}
+        </dl></div>
+        <div class="section"><h3>Member</h3><dl class="kv"><dt>Member</dt><dd class="mono">${esc(c.member.member_id)}</dd><dt>Plan</dt><dd>${esc(c.member.plan)}</dd><dt>Region</dt><dd>${esc(c.member.region)}</dd></dl>
+          <div class="phi-note" style="margin-top:8px">${ICON.lock}<span>Name, MRN and date of birth are withheld. This console works on pseudonymous ids under minimum-necessary access.</span></div></div>
+        <div class="section"><h3>Risk signals</h3><div class="table-wrap"><table class="data"><thead><tr><th>Rule</th><th>Signal</th><th>Severity</th><th style="width:34%">Score</th><th>Flagged</th></tr></thead><tbody>${flagRows}</tbody></table></div></div>
+        <div class="section"><h3>Payments${dupes ? ` <span class="pill pill-bad" style="margin-left:6px">${ICON.error}Duplicate disbursement</span>` : ""}</h3>
+          ${c.payments.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>Payment</th><th>Date</th><th>Payee</th><th>Method</th><th class="num">Amount</th></tr></thead><tbody>${payRows}</tbody></table></div>` : `<div class="muted">No disbursement recorded.</div>`}</div>
+        <div class="section"><h3>Member claim history</h3><div class="table-wrap"><table class="data"><thead><tr><th>Claim</th><th>Date</th><th>CPT</th><th>Status</th><th class="num">Billed</th></tr></thead><tbody>${histRows}</tbody></table></div></div>
+        <div class="section"><h3>Investigator notes</h3>
+          <div class="notice ${lead ? "" : "warn"}">${ICON.lock}<div>${c.note_count} note${c.note_count === 1 ? "" : "s"} on file. Notes are restricted to the SIU lead, and every read is held for approval.
+            ${lead ? `<div style="margin-top:8px"><button class="btn btn-sm" id="reqNotes">${ICON.play} Request notes for open cases</button></div>` : ""}</div></div></div>
+        <div class="section"><h3>Investigate with the agent</h3><div class="row">
+          <button class="chip" data-q="How many claims were flagged by each risk rule in March 2025?">Rule volume, March</button>
+          <button class="chip" data-q="What is the false positive rate of closed cases by rule?">False-positive rate by rule</button>
+          <button class="chip" data-q="How many duplicate payments were made and what was the total overpaid amount?">Duplicate overpayment</button>
+          <a class="chip" href="#/policy" id="toPolicy">Check the governing policy</a></div></div>
+      </div>`;
+    $("#closeDrawer").addEventListener("click", closeDrawer);
+    $("#reqNotes")?.addEventListener("click", () => { closeDrawer(); goAsk("Show the investigator notes for open cases."); });
+    dr.querySelectorAll("[data-q]").forEach((b) => b.addEventListener("click", () => { closeDrawer(); goAsk(b.dataset.q); }));
+    $("#toPolicy").addEventListener("click", closeDrawer);
+    bindTooltips(dr);
+    dr.focus();
+  } catch (e) { closeDrawer(); toast(e.message, true); }
+}
+function closeDrawer() {
+  const dr = $("#drawer");
+  if (!dr.classList.contains("open")) return;
+  dr.classList.remove("open"); dr.setAttribute("aria-hidden", "true"); $("#scrim").hidden = true;
+  if (drawerReturnFocus && document.contains(drawerReturnFocus)) drawerReturnFocus.focus();
+}
+
+// ======================================================================
+// AUDIT TRAIL
+// ======================================================================
+const AUDIT_TYPES = {
+  phi_blocked: ["pill-bad", "PHI access blocked"], guard_rejected: ["pill-serious", "Guard rejected"],
+  approval_requested: ["pill-warn", "Approval requested"], approval_approved: ["pill-good", "Approved"], approval_rejected: ["pill-bad", "Rejected"],
+  refused: ["pill-serious", "Refused"], failed: ["pill-bad", "Failed"], ungrounded: ["pill-warn", "Ungrounded"],
+  answered: ["pill-info", "Answered"], clarification: ["", "Clarification"], query: ["", "Query"],
+};
+function auditBadge(e) {
+  const [cls, label] = AUDIT_TYPES[e.type] || ["", e.type];
+  return `<span class="pill ${cls}">${esc(label)}</span>`;
+}
+async function renderAudit() {
+  const a = await api("/audit?limit=1000");
+  const c = a.counts;
+  const filters = [["all", "All events"], ["security", "Security"], ["approvals", "Approvals"], ["outcomes", "Outcomes"]];
+  const groups = { security: ["phi_blocked", "guard_rejected", "refused"], approvals: ["approval_requested", "approval_approved", "approval_rejected"], outcomes: ["answered", "clarification", "failed", "ungrounded"] };
+  const events = a.events.filter((e) => state.auditFilter === "all" || groups[state.auditFilter].includes(e.type));
+  view.innerHTML = `
+    <div class="page-head"><div><h1>Audit trail</h1><p>Every agent interaction in this session: who asked, what the guard decided, which queries were held for approval and who approved them. PHI access attempts are recorded even when they are blocked.</p></div>
+      <div class="page-actions"><button class="btn" id="exportAudit">Export CSV</button></div></div>
+    <div class="kpis">
+      <div class="card card-pad kpi"><div class="label">Queries</div><div class="value">${c.query || 0}</div><div class="note">questions asked</div></div>
+      <div class="card card-pad kpi"><div class="label">PHI access blocked</div><div class="value" style="color:var(--critical-ink)">${c.phi_blocked || 0}</div><div class="note">restricted columns rejected by the guard</div></div>
+      <div class="card card-pad kpi"><div class="label">Held for approval</div><div class="value">${c.approval_requested || 0}</div><div class="note">${c.approval_approved || 0} approved · ${c.approval_rejected || 0} rejected</div></div>
+      <div class="card card-pad kpi"><div class="label">Refused or failed</div><div class="value">${(c.refused || 0) + (c.failed || 0)}</div><div class="note">no data returned</div></div>
+    </div>
+    <div class="card card-pad">
+      <div class="toolbar"><div class="segmented" role="tablist" aria-label="Filter events">${filters.map(([k2, l]) => `<button role="tab" data-af="${k2}" aria-selected="${state.auditFilter === k2}">${esc(l)}</button>`).join("")}</div>
+        <span class="spacer"></span><span class="muted">${events.length} event${events.length === 1 ? "" : "s"}</span></div>
+      ${events.length ? `<ul class="audit-list">${events.map((e) => `<li>
+          <span class="when">${new Date(e.ts * 1000).toLocaleTimeString()}</span>
+          <span>${auditBadge(e)}<span class="sub2" style="margin-top:4px">${esc(roleLabel(e.role))}</span></span>
+          <span><div>${esc(e.detail)}</div><div class="q">"${esc(e.question)}"</div></span>
+          <a class="rid" href="#/ask" data-run="${esc(e.run_id)}">${esc(e.run_id)}</a></li>`).join("")}</ul>`
+        : `<div class="empty">${ICON.info}<div>No events yet. Ask a question to start the trail.</div></div>`}
+    </div>`;
+  view.querySelectorAll("[data-af]").forEach((b) => b.addEventListener("click", () => { state.auditFilter = b.dataset.af; renderAudit(); }));
+  view.querySelectorAll("[data-run]").forEach((l) => l.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    try { state.run = await api(`/runs/${l.dataset.run}`); location.hash = "#/ask"; } catch (e) { toast(e.message, true); }
+  }));
+  $("#exportAudit").addEventListener("click", () => {
+    downloadCsv("agent-audit-trail.csv", ["time", "type", "role", "run_id", "detail", "question"],
+      events.map((e) => ({ ...e, time: new Date(e.ts * 1000).toISOString() })));
+    toast(`Exported ${events.length} events`);
+  });
+}
+
 // ------------------------------------------------------------------ router --
-const VIEWS = { ask: renderAsk, approvals: renderApprovals, policy: renderPolicy, evals: renderEvals, schema: renderSchema };
+const VIEWS = { overview: renderOverview, cases: renderCases, ask: renderAsk, approvals: renderApprovals, policy: renderPolicy,
+  evals: renderEvals, audit: renderAudit, schema: renderSchema };
+const CRUMBS = { overview: ["Operations", "Overview"], cases: ["Operations", "Case worklist"], approvals: ["Operations", "SIU approvals"],
+  ask: ["Agent", "Ask the data"], policy: ["Agent", "Policy navigator"], evals: ["Governance", "Evaluation"],
+  audit: ["Governance", "Audit trail"], schema: ["Governance", "Data catalog"] };
 async function route() {
-  const name = (location.hash.match(/^#\/(\w+)/) || [])[1] || "ask";
-  const fn = VIEWS[name] || renderAsk;
-  document.querySelectorAll(".rail a").forEach((a) => (a.dataset.view === name ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
+  const name = (location.hash.match(/^#\/(\w+)/) || [])[1] || "overview";
+  const fn = VIEWS[name] || renderOverview;
+  const [grp, page] = CRUMBS[name] || CRUMBS.overview;
+  $("#crumbGroup").textContent = grp; $("#crumbPage").textContent = page;
+  document.title = `${page} · Payment Integrity Console`;
+  document.querySelectorAll(".side-nav a").forEach((a) => (a.dataset.view === name ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
+  document.documentElement.removeAttribute("data-nav-open");
   tooltip.hidden = true;
   try { await fn(); } catch (e) { view.innerHTML = `<div class="card"><div class="empty">${ICON.error}<div>${esc(e.message)}</div></div></div>`; }
 }
@@ -623,14 +1012,16 @@ addEventListener("keydown", (e) => {
 });
 
 (async function init() {
-  document.querySelectorAll("#roleSwitch button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.role === state.role)));
+  syncIdentity();
+  initShell();
   try {
     state.meta = await api("/meta");
     const p = $("#provider");
-    p.textContent = state.meta.offline ? "offline · deterministic model" : state.meta.provider;
+    p.textContent = state.meta.offline ? "Offline · deterministic model" : `Live · ${state.meta.provider}`;
     p.title = state.meta.offline ? "No ANTHROPIC_API_KEY set: a scripted stand-in model drives the same pipeline" : "Claude via the Anthropic SDK";
   } catch (e) { toast("API unreachable: " + e.message, true); }
   await refreshQueue();
+  refreshOpenCount();
   route();
   setInterval(refreshQueue, 15000);
 })();

@@ -10,6 +10,10 @@
     GET  /schema?role=           catalog as the given role sees it, plus metric definitions
     GET  /meta                   provider, roles, example questions
     POST /evals/run              run the golden suite and the retrieval A/B
+    GET  /dashboard              operational KPIs, monthly trend, rule performance, providers
+    GET  /cases                  investigation worklist (pseudonymous member ids only)
+    GET  /cases/{case_id}        case detail: claim, flags, payments, member history
+    GET  /audit                  audit trail derived from every run: PHI blocks, approvals, refusals
     GET  /health
 
 Run:  uvicorn api.main:app --reload     then open http://localhost:8000/
@@ -27,7 +31,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from analyst import catalog
+from analyst import catalog, insights
 from analyst.agent import AnalystAgent
 from analyst.evals.run_evals import fake_playbook, load_golden, run_suite, summarize
 from analyst.llm import FakeAnalystLLM, make_llm
@@ -302,3 +306,68 @@ def evals_run():
                        "navigator": r.navigator_sections, "baseline_recall": r.baseline_recall,
                        "navigator_recall": r.navigator_recall} for r in retrieval],
     }
+
+
+# --------------------------------------------------------------------------- #
+# operations views (fixed, reviewed queries; never model-generated)
+# --------------------------------------------------------------------------- #
+@app.get("/dashboard")
+def dashboard():
+    data = insights.overview(app.state.agent.conn)
+    data["queue"] = [run_brief(r) for r in app.state.agent.runs() if r.status == "awaiting_approval"]
+    return data
+
+
+@app.get("/cases")
+def list_cases():
+    return insights.cases(app.state.agent.conn)
+
+
+@app.get("/cases/{case_id}")
+def get_case(case_id: str):
+    case = insights.case_detail(app.state.agent.conn, case_id)
+    if case is None:
+        raise HTTPException(404, "case not found")
+    return case
+
+
+def _audit_events(s: RunState) -> list[dict[str, Any]]:
+    base = {"run_id": s.run_id, "role": s.role, "question": s.question}
+    out = [{**base, "ts": s.created_at, "type": "query", "severity": "info", "detail": f"Question asked as {s.role}"}]
+    for line in s.trace:
+        if line.startswith("guard REJECTED:"):
+            msg = line.split(":", 1)[1].strip()
+            phi = "restricted column" in msg
+            out.append({**base, "ts": s.created_at, "type": "phi_blocked" if phi else "guard_rejected",
+                        "severity": "critical" if phi else "warning", "detail": msg})
+        elif "approval=required" in line:
+            out.append({**base, "ts": s.created_at, "type": "approval_requested", "severity": "warning",
+                        "detail": "Query on a sensitive table held for SIU-lead approval"})
+        elif line.startswith("human decision:"):
+            decision = line.split(":", 1)[1].strip()
+            reviewer = next((t.split(":", 1)[1].strip() for t in s.trace if t.startswith("reviewer:")), "unknown")
+            out.append({**base, "ts": s.created_at, "type": f"approval_{decision}", "severity": "info" if decision == "approved" else "warning",
+                        "detail": f"{decision.capitalize()} by {reviewer}"})
+        elif line.startswith("verify: UNGROUNDED"):
+            out.append({**base, "ts": s.created_at, "type": "ungrounded", "severity": "warning", "detail": line.split(":", 1)[1].strip()})
+    if s.status == "needs_clarification":
+        out.append({**base, "ts": s.created_at, "type": "clarification", "severity": "info", "detail": s.answer or "Clarification requested"})
+    elif s.status == "refused":
+        out.append({**base, "ts": s.created_at, "type": "refused", "severity": "warning", "detail": s.answer or "Refused"})
+    elif s.status == "failed":
+        out.append({**base, "ts": s.created_at, "type": "failed", "severity": "critical", "detail": s.error or "Failed"})
+    elif s.status == "done":
+        out.append({**base, "ts": s.created_at, "type": "answered", "severity": "info",
+                    "detail": f"{len(s.rows)} rows from {', '.join(s.tables) or 'n/a'}; grounded={s.grounded}"})
+    return out
+
+
+@app.get("/audit")
+def audit(limit: int = Query(300, ge=1, le=2000)):
+    events: list[dict[str, Any]] = []
+    for r in app.state.agent.runs():
+        events.extend(reversed(_audit_events(r)))
+    counts: dict[str, int] = {}
+    for e in events:
+        counts[e["type"]] = counts.get(e["type"], 0) + 1
+    return {"events": events[:limit], "counts": counts}

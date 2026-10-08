@@ -133,6 +133,10 @@ class FakeAnalystLLM:
         key = self._norm(question)
         entry = self.playbook.get(f"{role}::{key}", self.playbook.get(key))
         if entry is None:
+            # No script for this role: reuse another role's script. The real model's plan
+            # does not depend on the role either; the guard enforces what each role may run.
+            entry = next((v for k, v in self.playbook.items() if k.endswith(f"::{key}")), None)
+        if entry is None:
             return QueryPlan(
                 intent=question, needs_clarification=True,
                 clarification_question="I don't have a confident interpretation of that question. Which metric and time range do you mean?",
