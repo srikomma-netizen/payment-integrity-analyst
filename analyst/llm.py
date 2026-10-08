@@ -138,6 +138,10 @@ class FakeAnalystLLM:
                 clarification_question="I don't have a confident interpretation of that question. Which metric and time range do you mean?",
             )
         if isinstance(entry, list):
+            # A call without feedback is the first attempt of a new run, so the
+            # script restarts; a real model has no memory across runs either.
+            if feedback is None:
+                self._attempts[key] = 0
             i = self._attempts.get(key, 0)
             self._attempts[key] = i + 1
             return entry[min(i, len(entry) - 1)]

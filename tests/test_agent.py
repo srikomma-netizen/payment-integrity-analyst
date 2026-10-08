@@ -88,3 +88,16 @@ def test_groundedness_check():
     assert is_grounded("Lakeside billed about 13k.", cols, rows)[0]
     ok, bad = is_grounded("Lakeside billed 20,000.", cols, rows)
     assert not ok and bad == [20000.0]
+
+
+def test_fake_script_restarts_each_run(conn):
+    """Asking the same question twice must replay the full script both times."""
+    agent = make_agent(conn, {
+        "member details": [
+            QueryPlan(intent="x", sql="SELECT member_id, mrn FROM members"),
+            QueryPlan(intent="x", sql="SELECT member_id, plan FROM members"),
+        ],
+    })
+    first, second = agent.ask("Member details"), agent.ask("Member details")
+    assert first.attempts == second.attempts == 2
+    assert all(any("REJECTED" in t for t in s.trace) for s in (first, second))
